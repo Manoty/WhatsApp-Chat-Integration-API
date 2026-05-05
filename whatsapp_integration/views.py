@@ -9,6 +9,9 @@ from django.views.decorators.csrf import csrf_exempt
 from .models import BusinessAccount, WhatsAppContact, Conversation, Message
 from .services.webhook_service import WebhookService
 
+from .serializers import SendMessageRequestSerializer
+from .services.message_service import MessageService, MessageSendError
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,3 +126,106 @@ def _detect_source(payload: dict) -> str:
     if "object" in payload and "entry" in payload:
         return "meta"
     return "twilio"  # default fallback
+
+# ─── Send Message ─────────────────────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def send_message(request):
+    """
+    Send a WhatsApp message programmatically.
+
+    POST /api/messages/send/
+    {
+        "business_id": "<uuid>",
+        "to_number": "+254712345678",
+        "body": "Hello from the API!"
+    }
+    """
+    serializer = SendMessageRequestSerializer(data=request.data)
+
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    validated = serializer.validated_data
+
+    try:
+        service = MessageService()
+        message = service.send_message(
+            business_id=str(validated["business_id"]),
+            to_number=validated["to_number"],
+            body=validated["body"],
+            message_type=validated.get("message_type", "text"),
+        )
+
+        return Response(
+            {
+                "status": "sent",
+                "message_id": str(message.id),
+                "conversation_id": str(message.conversation.id),
+                "provider_message_id": message.provider_message_id,
+                "to_number": message.conversation.contact.phone_number,
+                "body": message.body,
+                "created_at": message.created_at.isoformat(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except MessageSendError as exc:
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as exc:
+        logger.exception("Unexpected error in send_message view: %s", exc)
+        return Response(
+            {"status": "error", "message": "Internal server error"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+# ─── Status Callback ──────────────────────────────────────────────────────────
+
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def message_status_callback(request):
+    """
+    Twilio calls this URL when a message status changes
+    (sent → delivered → read).
+
+    Configure in Twilio console as your Status Callback URL.
+    POST /api/messages/status/
+    """
+    payload = request.data
+    provider_message_id = payload.get("MessageSid", "")
+    raw_status = payload.get("MessageStatus", "")
+
+    STATUS_MAP = {
+        "sent": Message.Status.SENT,
+        "delivered": Message.Status.DELIVERED,
+        "read": Message.Status.READ,
+        "failed": Message.Status.FAILED,
+        "undelivered": Message.Status.FAILED,
+    }
+
+    new_status = STATUS_MAP.get(raw_status)
+
+    if not provider_message_id or not new_status:
+        logger.warning("Invalid status callback payload: %s", payload)
+        return Response({"status": "ignored"}, status=200)
+
+    service = MessageService()
+    message = service.update_message_status(provider_message_id, new_status)
+
+    if message:
+        return Response({
+            "status": "updated",
+            "message_id": str(message.id),
+            "new_status": message.status,
+        })
+
+    return Response({"status": "not_found"}, status=200)
