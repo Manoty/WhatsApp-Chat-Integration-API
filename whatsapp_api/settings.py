@@ -131,3 +131,5 @@ LOGGING = {
         },
     },
 }
+
+WHATSAPP_MOCK_MODE = os.getenv("WHATSAPP_MOCK_MODE", "True") == "True"
