@@ -98,3 +98,36 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.AllowAny",  # Tightened in Phase 7
     ],
 }
+
+# ─── WhatsApp Config ──────────────────────────────────────────────────────────
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "my_verify_token")
+WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "https://api.twilio.com")
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{asctime}] {levelname} {name} — {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "whatsapp_integration": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+    },
+}
