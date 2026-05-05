@@ -56,3 +56,48 @@ class ConversationSerializer(serializers.ModelSerializer):
 
     def get_message_count(self, obj):
         return obj.messages.count()
+    
+class SendMessageRequestSerializer(serializers.Serializer):
+    """Validates the request body for POST /api/messages/send/"""
+    business_id = serializers.UUIDField(
+        help_text="UUID of the BusinessAccount sending the message"
+    )
+    to_number = serializers.CharField(
+        max_length=20,
+        help_text="Recipient phone number in E.164 format e.g. +254712345678"
+    )
+    body = serializers.CharField(
+        max_length=4096,
+        help_text="Message text content"
+    )
+    message_type = serializers.ChoiceField(
+        choices=["text"],        # Expand in later phases
+        default="text",
+        required=False,
+    )
+
+    def validate_to_number(self, value):
+        value = value.strip()
+        if not value.startswith("+"):
+            value = f"+{value}"
+        if len(value) < 8:
+            raise serializers.ValidationError(
+                "Phone number too short. Use E.164 format e.g. +254712345678"
+            )
+        return value
+
+    def validate_body(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Message body cannot be empty.")
+        return value.strip()
+
+
+class SendMessageResponseSerializer(serializers.Serializer):
+    """Shape of the response returned after a successful send."""
+    message_id = serializers.UUIDField()
+    conversation_id = serializers.UUIDField()
+    status = serializers.CharField()
+    provider_message_id = serializers.CharField()
+    to_number = serializers.CharField()
+    body = serializers.CharField()
+    created_at = serializers.DateTimeField()    
