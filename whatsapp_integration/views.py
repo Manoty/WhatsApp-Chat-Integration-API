@@ -17,6 +17,10 @@ from .serializers import (
     WhatsAppContactSerializer,
     AutoReplyRuleSerializer,
 )
+
+from .models import MediaAttachment
+from .serializers import SendMediaRequestSerializer, MediaAttachmentSerializer
+
 from .services.webhook_service import WebhookService
 from .services.message_service import MessageService, MessageSendError
 from .security import verify_webhook_signature
@@ -540,3 +544,156 @@ def task_status(request, task_id):
             response["error"] = str(result.result)
 
     return Response(response)
+
+# ─── Media Messages ───────────────────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([SendMessageRateThrottle])
+def send_media_message(request):
+    """
+    Send a media message (image, audio, video, document) via WhatsApp.
+
+    POST /api/messages/send/media/
+    {
+        "business_id": "<uuid>",
+        "to_number": "+254712345678",
+        "media_url": "https://example.com/image.jpg",
+        "media_type": "image",
+        "caption": "Check out our latest product!"
+    }
+    """
+    serializer = SendMediaRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    v = serializer.validated_data
+
+    try:
+        from .services.message_service import MessageService, MessageSendError
+        from .tasks import send_whatsapp_media_task
+
+        svc        = MessageService()
+        business   = svc._get_business(str(v["business_id"]))
+        to_number  = svc._normalize_phone(v["to_number"])
+        contact    = svc._get_or_create_contact(business, to_number)
+        conv       = svc._get_or_create_conversation(business, contact)
+
+        # Pre-create Message + MediaAttachment as PENDING
+        message = Message.objects.create(
+            conversation=conv,
+            direction=Message.Direction.OUTBOUND,
+            message_type=v["media_type"],
+            body=v.get("caption", ""),
+            status=Message.Status.PENDING,
+        )
+
+        MediaAttachment.objects.create(
+            message=message,
+            category=v["media_type"],
+            media_url=v["media_url"],
+            caption=v.get("caption", ""),
+        )
+
+        # Queue async task
+        task = send_whatsapp_media_task.apply_async(
+            kwargs={
+                "business_id":  str(v["business_id"]),
+                "to_number":    to_number,
+                "media_url":    v["media_url"],
+                "media_type":   v["media_type"],
+                "caption":      v.get("caption", ""),
+                "message_id":   str(message.id),
+            },
+            queue="messages",
+        )
+
+        return Response(
+            {
+                "status":       "queued",
+                "message_id":   str(message.id),
+                "task_id":      task.id,
+                "media_type":   v["media_type"],
+                "media_url":    v["media_url"],
+                "to_number":    to_number,
+                "caption":      v.get("caption", ""),
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    except Exception as exc:
+        logger.exception("Media send error: %s", exc)
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def message_media(request, message_id):
+    """
+    Get the media attachment for a specific message.
+
+    GET /api/messages/<message_id>/media/
+    """
+    try:
+        message = Message.objects.get(id=message_id)
+    except Message.DoesNotExist:
+        return Response(
+            {"error": "Message not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    try:
+        attachment = message.media_attachment
+    except MediaAttachment.DoesNotExist:
+        return Response(
+            {"error": "No media attachment on this message"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    return Response(MediaAttachmentSerializer(attachment).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def conversation_media(request, conversation_id):
+    """
+    List all media in a conversation — useful for a media gallery view.
+
+    GET /api/conversations/<id>/media/
+    Query params:
+      ?category=image|audio|video|document
+    """
+    try:
+        conversation = Conversation.objects.get(id=conversation_id)
+    except Conversation.DoesNotExist:
+        return Response(
+            {"error": "Conversation not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    attachments = MediaAttachment.objects.filter(
+        message__conversation=conversation
+    ).select_related("message").order_by("-created_at")
+
+    category = request.GET.get("category")
+    if category:
+        attachments = attachments.filter(category=category)
+
+    page, page_size = _get_pagination(request, default_size=20)
+    total  = attachments.count()
+    start  = (page - 1) * page_size
+    subset = attachments[start:start + page_size]
+
+    return Response({
+        "conversation_id": str(conversation_id),
+        "count":           total,
+        "page":            page,
+        "total_pages":     max(1, (total + page_size - 1) // page_size),
+        "results":         MediaAttachmentSerializer(subset, many=True).data,
+    })
