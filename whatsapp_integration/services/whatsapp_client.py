@@ -72,7 +72,36 @@ class MockWhatsAppClient:
                 "media_type": media_type,
                 "sid": fake_sid,
             },
-        )    
+        )  
+    
+    def send_template_message(
+        self,
+        to_number: str,
+        from_number: str,
+        template_name: str,
+        language: str,
+        variables: list,
+        rendered_body: str = "",
+    ) -> SendResult:
+        import uuid
+        fake_sid = f"MOCK_TP{uuid.uuid4().hex[:20].upper()}"
+        logger.info(
+            "[MOCK] Sending template | to=%s | template=%s | lang=%s | sid=%s",
+            to_number, template_name, language, fake_sid,
+        )
+        return SendResult(
+            success=True,
+            provider_message_id=fake_sid,
+            raw_response={
+                "mock":          True,
+                "to":            to_number,
+                "template_name": template_name,
+                "language":      language,
+                "variables":     variables,
+                "rendered_body": rendered_body,
+                "sid":           fake_sid,
+            },
+        )      
 
 
 class TwilioWhatsAppClient:
@@ -160,7 +189,48 @@ class TwilioWhatsAppClient:
             logger.error(
                 "[TWILIO] Media send failed | to=%s | error=%s", to_number, exc
             )
-            return SendResult(success=False, error_message=str(exc))        
+            return SendResult(success=False, error_message=str(exc))
+        
+    def send_template_message(
+        self,
+        to_number: str,
+        from_number: str,
+        template_name: str,
+        language: str,
+        variables: list,
+        rendered_body: str = "",
+    ) -> SendResult:
+        """
+        Twilio sends templates as regular messages with pre-approved body text.
+        Meta API uses a structured template payload — extend here for Meta.
+        """
+        try:
+            client = self._get_client()
+            message = client.messages.create(
+                body=rendered_body,
+                from_=f"whatsapp:{from_number}",
+                to=f"whatsapp:{to_number}",
+            )
+            logger.info(
+                "[TWILIO] Template sent | sid=%s | template=%s | to=%s",
+                message.sid, template_name, to_number,
+            )
+            return SendResult(
+                success=True,
+                provider_message_id=message.sid,
+                raw_response={
+                    "sid":           message.sid,
+                    "status":        message.status,
+                    "template_name": template_name,
+                    "to":            message.to,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "[TWILIO] Template send failed | template=%s | to=%s | error=%s",
+                template_name, to_number, exc,
+            )
+            return SendResult(success=False, error_message=str(exc))           
             
             
 
