@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import BusinessAccount, WhatsAppContact, Conversation, Message
-
+ 
+from .models import AutoReplyRule
 
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(admin.ModelAdmin):
@@ -29,3 +30,16 @@ class MessageAdmin(admin.ModelAdmin):
     search_fields = ("body", "provider_message_id")
     list_filter = ("direction", "status", "message_type")
     readonly_fields = ("raw_payload",)
+    
+   
+
+@admin.register(AutoReplyRule)
+class AutoReplyRuleAdmin(admin.ModelAdmin):
+    list_display = (
+        "name", "business", "match_type", "keyword",
+        "is_active", "is_fallback", "priority", "trigger_count",
+    )
+    list_filter = ("business", "is_active", "is_fallback", "match_type")
+    search_fields = ("name", "keyword", "reply_text")
+    readonly_fields = ("trigger_count", "created_at", "updated_at")
+    ordering = ("business", "priority")    

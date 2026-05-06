@@ -20,49 +20,49 @@ class WebhookService:
     # ── Public entry point ────────────────────────────────────────────────────
 
     def process_incoming_message(self, payload: dict, source: str = "twilio") -> Message | None:
-    """
-    Main method called by the webhook view.
-    Returns the saved Message object or None if skipped (duplicate).
-    Now triggers AutoReplyEngine after storing every inbound message.
-    """
-    try:
-        if source == "twilio":
-            normalized = self._normalize_twilio(payload)
-        else:
-            normalized = self._normalize_meta(payload)
-
-        if not normalized:
-            logger.warning("Webhook payload could not be normalized: %s", payload)
-            return None
-
-        business = self._resolve_business(normalized["to_number"])
-        if not business:
-            logger.warning(
-                "No BusinessAccount found for phone_number_id=%s",
-                normalized["to_number"],
-            )
-            return None
-
-        contact = self._get_or_create_contact(business, normalized)
-        conversation = self._get_or_create_conversation(business, contact)
-        message = self._store_message(conversation, normalized, payload)
-
-        if message is None:
-            return None  # Duplicate — already handled
-
-        # ── Trigger auto-reply engine ─────────────────────────────────────────
+        """
+        Main method called by the webhook view.
+        Returns the saved Message object or None if skipped (duplicate).
+        Now triggers AutoReplyEngine after storing every inbound message.
+        """
         try:
-            engine = AutoReplyEngine()
-            engine.process(message)
+            if source == "twilio":
+                normalized = self._normalize_twilio(payload)
+            else:
+                normalized = self._normalize_meta(payload)
+
+            if not normalized:
+                logger.warning("Webhook payload could not be normalized: %s", payload)
+                return None
+
+            business = self._resolve_business(normalized["to_number"])
+            if not business:
+                logger.warning(
+                    "No BusinessAccount found for phone_number_id=%s",
+                    normalized["to_number"],
+                )
+                return None
+
+            contact = self._get_or_create_contact(business, normalized)
+            conversation = self._get_or_create_conversation(business, contact)
+            message = self._store_message(conversation, normalized, payload)
+
+            if message is None:
+                return None  # Duplicate — already handled
+
+            # ── Trigger auto-reply engine ─────────────────────────────────────────
+            try:
+                engine = AutoReplyEngine()
+                engine.process(message)
+            except Exception as exc:
+                # Never let auto-reply crash the webhook response
+                logger.exception("AutoReplyEngine error (non-fatal): %s", exc)
+
+            return message
+
         except Exception as exc:
-            # Never let auto-reply crash the webhook response
-            logger.exception("AutoReplyEngine error (non-fatal): %s", exc)
-
-        return message
-
-    except Exception as exc:
-        logger.exception("Unexpected error processing webhook: %s", exc)
-        return None
+            logger.exception("Unexpected error processing webhook: %s", exc)
+            return None
 
     # ── Normalizers ───────────────────────────────────────────────────────────
 
@@ -244,7 +244,7 @@ class WebhookService:
             message_type=normalized["message_type"],
             body=normalized["body"],
             provider_message_id=provider_id,
-            status=Message.Status.DELIVERED,  # inbound = already delivered to us
+            status=Message.Status.DELIVERED,
             raw_payload=raw_payload,
         )
 
