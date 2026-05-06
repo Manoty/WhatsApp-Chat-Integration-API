@@ -30,15 +30,17 @@ class WhatsAppContactSerializer(serializers.ModelSerializer):
 
 
 class MessageSerializer(serializers.ModelSerializer):
+    media_attachment = MediaAttachmentSerializer(read_only=True)
+
     class Meta:
         model = Message
         fields = [
             "id", "conversation", "direction", "message_type",
             "body", "provider_message_id", "status",
             "status_updated_at", "created_at",
+            "media_attachment",        # ← NEW
         ]
         read_only_fields = ["id", "created_at", "status_updated_at"]
-
 
 class ConversationSerializer(serializers.ModelSerializer):
     contact = WhatsAppContactSerializer(read_only=True)
