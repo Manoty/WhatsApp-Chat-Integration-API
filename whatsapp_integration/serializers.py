@@ -29,6 +29,16 @@ class WhatsAppContactSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at"]
 
 
+class MediaAttachmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MediaAttachment
+        fields = [
+            "id", "category", "media_url", "provider_media_id",
+            "mime_type", "file_name", "file_size", "caption",
+            "stored_url", "is_downloaded", "created_at",
+        ]
+        read_only_fields = fields
+
 class MessageSerializer(serializers.ModelSerializer):
     media_attachment = MediaAttachmentSerializer(read_only=True)
 
@@ -145,16 +155,6 @@ class AutoReplyRuleSerializer(serializers.ModelSerializer):
 
         return data
 
-
-class MediaAttachmentSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = MediaAttachment
-        fields = [
-            "id", "category", "media_url", "provider_media_id",
-            "mime_type", "file_name", "file_size", "caption",
-            "stored_url", "is_downloaded", "created_at",
-        ]
-        read_only_fields = fields
 
 
 class SendMediaRequestSerializer(serializers.Serializer):
