@@ -194,3 +194,106 @@ class SendMediaRequestSerializer(serializers.Serializer):
             )
         return value
 
+
+class MessageTemplateSerializer(serializers.ModelSerializer):
+    variable_count = serializers.IntegerField(read_only=True)
+    send_count     = serializers.IntegerField(read_only=True)
+    success_count  = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model  = MessageTemplate
+        fields = [
+            "id", "business", "name", "template_name",
+            "category", "language", "body",
+            "header_text", "header_media_url", "footer_text",
+            "variable_count", "status", "provider_template_id",
+            "rejection_reason", "send_count", "success_count",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "variable_count", "status",
+            "provider_template_id", "rejection_reason",
+            "send_count", "success_count",
+            "created_at", "updated_at",
+        ]
+
+    def validate_template_name(self, value):
+        """Enforce snake_case — Meta requirement."""
+        import re
+        value = value.strip().lower().replace(" ", "_")
+        if not re.match(r"^[a-z0-9_]+$", value):
+            raise serializers.ValidationError(
+                "template_name must be snake_case "
+                "(lowercase letters, numbers, underscores only)."
+            )
+        return value
+
+    def validate_body(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Template body cannot be empty.")
+        return value.strip()
+
+
+class TemplateSendSerializer(serializers.ModelSerializer):
+    template_name = serializers.CharField(
+        source="template.template_name", read_only=True
+    )
+    contact_phone = serializers.CharField(
+        source="contact.phone_number", read_only=True
+    )
+
+    class Meta:
+        model  = TemplateSend
+        fields = [
+            "id", "template", "template_name", "contact",
+            "contact_phone", "variables", "rendered_body",
+            "status", "provider_message_id", "error_message",
+            "sent_at", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class SendTemplateRequestSerializer(serializers.Serializer):
+    """Validates POST /api/templates/send/"""
+    business_id   = serializers.UUIDField()
+    to_number     = serializers.CharField(max_length=20)
+    template_name = serializers.CharField(max_length=512)
+    variables     = serializers.ListField(
+        child=serializers.CharField(max_length=1024),
+        default=list,
+        help_text="Ordered list of values for {{1}}, {{2}}, {{3}} ...",
+    )
+    language      = serializers.CharField(max_length=10, default="en")
+
+    def validate_to_number(self, value):
+        value = value.strip()
+        if not value.startswith("+"):
+            value = f"+{value}"
+        if len(value) < 8:
+            raise serializers.ValidationError(
+                "Phone number too short. Use E.164 format."
+            )
+        return value
+
+
+class BulkSendTemplateRequestSerializer(serializers.Serializer):
+    """Validates POST /api/templates/send/bulk/"""
+
+    class RecipientSerializer(serializers.Serializer):
+        to_number = serializers.CharField(max_length=20)
+        variables = serializers.ListField(
+            child=serializers.CharField(max_length=1024),
+            default=list,
+        )
+
+    business_id   = serializers.UUIDField()
+    template_name = serializers.CharField(max_length=512)
+    language      = serializers.CharField(max_length=10, default="en")
+    recipients    = RecipientSerializer(many=True, min_length=1)
+
+    def validate_recipients(self, value):
+        if len(value) > 1000:
+            raise serializers.ValidationError(
+                "Maximum 1,000 recipients per bulk send request."
+            )
+        return value
