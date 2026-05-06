@@ -3,6 +3,8 @@ from .models import BusinessAccount, WhatsAppContact, Conversation, Message
  
 from .models import AutoReplyRule
 from .models import MediaAttachment
+from .models import MessageTemplate, TemplateSend
+
 
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(admin.ModelAdmin):
@@ -51,4 +53,46 @@ class MediaAttachmentAdmin(admin.ModelAdmin):
                      "file_size", "is_downloaded", "created_at")
     list_filter   = ("category", "is_downloaded")
     search_fields = ("file_name", "mime_type", "provider_media_id")
-    readonly_fields = ("created_at", "updated_at")    
+    readonly_fields = ("created_at", "updated_at")  
+    
+
+@admin.register(MessageTemplate)
+class MessageTemplateAdmin(admin.ModelAdmin):
+    list_display  = (
+        "name", "template_name", "business", "category",
+        "language", "status", "variable_count",
+        "send_count", "success_count", "created_at",
+    )
+    list_filter   = ("status", "category", "language", "business")
+    search_fields = ("name", "template_name", "body")
+    readonly_fields = (
+        "variable_count", "send_count", "success_count",
+        "provider_template_id", "created_at", "updated_at",
+    )
+    actions = ["submit_for_approval"]
+
+    def submit_for_approval(self, request, queryset):
+        from .services.template_service import TemplateService
+        svc = TemplateService()
+        for template in queryset.filter(
+            status__in=["draft", "rejected"]
+        ):
+            svc.submit_for_approval(template)
+        self.message_user(request, "Selected templates submitted for approval.")
+    submit_for_approval.short_description = "Submit selected templates for approval"
+
+
+@admin.register(TemplateSend)
+class TemplateSendAdmin(admin.ModelAdmin):
+    list_display  = (
+        "id", "template", "contact", "status",
+        "sent_at", "created_at",
+    )
+    list_filter   = ("status", "template")
+    search_fields = ("contact__phone_number", "rendered_body")
+    readonly_fields = (
+        "rendered_body", "variables", "provider_message_id",
+        "sent_at", "created_at",
+    )      
+    
+    
