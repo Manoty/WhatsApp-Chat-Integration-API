@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import BusinessAccount, WhatsAppContact, Conversation, Message
 
+import re 
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
     class Meta:
@@ -101,3 +102,39 @@ class SendMessageResponseSerializer(serializers.Serializer):
     to_number = serializers.CharField()
     body = serializers.CharField()
     created_at = serializers.DateTimeField()    
+    
+class AutoReplyRuleSerializer(serializers.ModelSerializer):
+    trigger_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = AutoReplyRule
+        fields = [
+            "id", "business", "name", "keyword", "match_type",
+            "reply_text", "is_active", "is_fallback", "priority",
+            "trigger_count", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "trigger_count", "created_at", "updated_at"]
+
+    def validate(self, data):
+        # Fallback rules don't need a keyword
+        is_fallback = data.get("is_fallback", False)
+        keyword = data.get("keyword", "").strip()
+
+        if not is_fallback and not keyword:
+            raise serializers.ValidationError(
+                {"keyword": "Keyword is required for non-fallback rules."}
+            )
+
+        # Validate regex pattern if match_type is regex
+        match_type = data.get("match_type", AutoReplyRule.MatchType.CONTAINS)
+        if match_type == AutoReplyRule.MatchType.REGEX and keyword:
+            try:
+                re.compile(keyword)
+            except re.error as exc:
+                raise serializers.ValidationError(
+                    {"keyword": f"Invalid regular expression: {exc}"}
+                )
+
+        return data
+
+
