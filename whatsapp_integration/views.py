@@ -465,3 +465,78 @@ def _get_pagination(request, default_size: int = 20) -> tuple[int, int]:
     except (ValueError, TypeError):
         page_size = default_size
     return page, page_size
+
+# ─── Async Send Message ───────────────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([SendMessageRateThrottle])
+def send_message_async(request):
+    """
+    Queue a WhatsApp message send as a Celery task.
+    Returns immediately with task_id — message is sent in background.
+
+    POST /api/messages/send/async/
+    Same request body as /api/messages/send/
+    """
+    serializer = SendMessageRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    validated = serializer.validated_data
+
+    try:
+        service = MessageService()
+        result = service.send_message_async(
+            business_id=str(validated["business_id"]),
+            to_number=validated["to_number"],
+            body=validated["body"],
+            message_type=validated.get("message_type", "text"),
+        )
+        return Response(
+            {
+                "status": "queued",
+                "message_id": result["message_id"],
+                "task_id": result["task_id"],
+                "to_number": result["to_number"],
+                "body": validated["body"],
+                "note": "Message queued for async delivery. Track via /api/tasks/<task_id>/",
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    except Exception as exc:
+        logger.exception("Failed to queue message: %s", exc)
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def task_status(request, task_id):
+    """
+    Check the status of a Celery task.
+
+    GET /api/tasks/<task_id>/
+    """
+    from celery.result import AsyncResult
+    result = AsyncResult(task_id)
+
+    response = {
+        "task_id": task_id,
+        "status": result.status,      # PENDING, STARTED, SUCCESS, FAILURE, RETRY
+        "ready": result.ready(),
+    }
+
+    if result.ready():
+        if result.successful():
+            response["result"] = result.result
+        else:
+            response["error"] = str(result.result)
+
+    return Response(response)
