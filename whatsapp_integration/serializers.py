@@ -1,7 +1,12 @@
+import re
 from rest_framework import serializers
-from .models import BusinessAccount, WhatsAppContact, Conversation, Message
-
-import re 
+from .models import (
+    BusinessAccount,
+    WhatsAppContact,
+    Conversation,
+    Message,
+    AutoReplyRule,
+)
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
     class Meta:

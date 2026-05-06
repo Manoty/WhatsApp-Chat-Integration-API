@@ -22,6 +22,10 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "corsheaders",
+    
+    "django_celery_results",   
+    "django_celery_beat", 
+    
     # Our apps
     "whatsapp_integration",
 ]
@@ -159,6 +163,38 @@ META_APP_SECRET = os.getenv("META_APP_SECRET", "")
 # Internal API key header name
 API_KEY_HEADER = "X-API-Key"
 
+
+# ─── Celery Configuration ─────────────────────────────────────────────────────
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = "django-db"          # Store results in Django DB
+CELERY_CACHE_BACKEND = "default"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "UTC"
+CELERY_TASK_TRACK_STARTED = True             # Mark tasks as STARTED in DB
+CELERY_TASK_TIME_LIMIT = 30 * 60            # Hard kill after 30 minutes
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60      # Soft warning at 25 minutes
+
+# Retry policy defaults — individual tasks can override
+CELERY_TASK_MAX_RETRIES = 3
+CELERY_TASK_DEFAULT_RETRY_DELAY = 60        # seconds
+
+# Beat scheduler — stores schedule in DB (manageable via Admin)
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+# Only acknowledge task AFTER it completes (safer for retries)
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1       # One task at a time per worker
+
+# ─── Cache (needed for celery cache backend) ──────────────────────────────────
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+    }
+}
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
@@ -202,3 +238,5 @@ LOGGING = {
         },
     },
 }
+
+API_KEYS = os.getenv("API_KEYS", "dev-key-12345").split(",")
