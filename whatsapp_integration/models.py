@@ -205,3 +205,81 @@ class Message(TimeStampedModel):
             f"[{self.direction.upper()}] {self.message_type} | "
             f"{self.status} | {self.created_at:%Y-%m-%d %H:%M}"
         )
+        
+        
+# ─── Automation Layer ─────────────────────────────────────────────────────────
+
+class AutoReplyRule(TimeStampedModel):
+    """
+    A single automation rule scoped to one BusinessAccount.
+
+    Rules are evaluated in priority order (lowest number = checked first).
+    The first matching rule wins — no multi-rule chaining.
+
+    Match types:
+      exact    — message body must equal keyword exactly (case-insensitive)
+      contains — message body must contain the keyword (case-insensitive)
+      startswith — message body must start with keyword (case-insensitive)
+      regex    — full Python regex match against message body
+
+    Special rule:
+      is_fallback=True → fires when NO other rule matches.
+      Only one fallback per business is meaningful.
+    """
+
+    class MatchType(models.TextChoices):
+        EXACT = "exact", "Exact Match"
+        CONTAINS = "contains", "Contains Keyword"
+        STARTSWITH = "startswith", "Starts With"
+        REGEX = "regex", "Regular Expression"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(
+        BusinessAccount,
+        on_delete=models.CASCADE,
+        related_name="auto_reply_rules",
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text="Human-readable name e.g. 'Pricing Enquiry Reply'",
+    )
+    keyword = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="The trigger keyword or pattern. Leave blank for fallback rules.",
+    )
+    match_type = models.CharField(
+        max_length=20,
+        choices=MatchType.choices,
+        default=MatchType.CONTAINS,
+    )
+    reply_text = models.TextField(
+        help_text="The message text to send when this rule matches.",
+    )
+    is_active = models.BooleanField(default=True)
+    is_fallback = models.BooleanField(
+        default=False,
+        help_text="If True, this rule fires when no other rule matches.",
+    )
+    priority = models.PositiveIntegerField(
+        default=10,
+        help_text="Lower number = evaluated first. Range: 1 (highest) to 100 (lowest).",
+    )
+    # Track how many times this rule has fired (analytics)
+    trigger_count = models.PositiveIntegerField(default=0, editable=False)
+
+    class Meta:
+        db_table = "auto_reply_rules"
+        ordering = ["priority", "created_at"]
+
+    def __str__(self):
+        if self.is_fallback:
+            return f"[FALLBACK] {self.name} @ {self.business.name}"
+        return f"[{self.match_type}] '{self.keyword}' → {self.name}"
+
+    def increment_trigger_count(self):
+        """Thread-safe counter increment."""
+        AutoReplyRule.objects.filter(id=self.id).update(
+            trigger_count=models.F("trigger_count") + 1
+        )        
