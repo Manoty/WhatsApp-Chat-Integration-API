@@ -2,7 +2,6 @@ import logging
 from django.utils import timezone
 from ..models import BusinessAccount, WhatsAppContact, Conversation, Message
 
-from .auto_reply_engine import AutoReplyEngine
 
 logger = logging.getLogger(__name__)
 
@@ -10,21 +9,9 @@ logger = logging.getLogger(__name__)
 class WebhookService:
     """
     Handles the full lifecycle of an incoming WhatsApp webhook event:
-      1. Parse and normalize the payload (Twilio or Meta format)
-      2. Resolve the BusinessAccount
-      3. Get or create the WhatsAppContact
-      4. Get or create the Conversation
-      5. Deduplicate and store the Message
     """
 
-    # ── Public entry point ────────────────────────────────────────────────────
-
     def process_incoming_message(self, payload: dict, source: str = "twilio") -> Message | None:
-        """
-        Main method called by the webhook view.
-        Returns the saved Message object or None if skipped (duplicate).
-        Now triggers AutoReplyEngine after storing every inbound message.
-        """
         try:
             if source == "twilio":
                 normalized = self._normalize_twilio(payload)
@@ -48,15 +35,26 @@ class WebhookService:
             message = self._store_message(conversation, normalized, payload)
 
             if message is None:
-                return None  # Duplicate — already handled
+                return None
 
-            # ── Trigger auto-reply engine ─────────────────────────────────────────
+            # ── Queue auto-reply task (NON-BLOCKING) ──────────────────────────
             try:
-                engine = AutoReplyEngine()
-                engine.process(message)
+                from ..tasks import process_auto_reply_task
+
+                process_auto_reply_task.apply_async(
+                    kwargs={"message_id": str(message.id)},
+                    queue="messages",
+                    countdown=1,
+                )
+
+                logger.info(
+                    "Auto-reply task queued | message_id=%s", message.id
+                )
+
             except Exception as exc:
-                # Never let auto-reply crash the webhook response
-                logger.exception("AutoReplyEngine error (non-fatal): %s", exc)
+                logger.exception(
+                    "Failed to queue auto-reply task (non-fatal): %s", exc
+                )
 
             return message
 
@@ -67,17 +65,6 @@ class WebhookService:
     # ── Normalizers ───────────────────────────────────────────────────────────
 
     def _normalize_twilio(self, payload: dict) -> dict | None:
-        """
-        Twilio WhatsApp webhook payload shape:
-        {
-            "MessageSid": "SMxxx",
-            "From": "whatsapp:+254712345678",
-            "To": "whatsapp:+254700000000",
-            "Body": "Hello there",
-            "NumMedia": "0",
-            ...
-        }
-        """
         from_number = payload.get("From", "").replace("whatsapp:", "").strip()
         to_number = payload.get("To", "").replace("whatsapp:", "").strip()
         body = payload.get("Body", "").strip()
@@ -86,7 +73,6 @@ class WebhookService:
         if not from_number or not to_number:
             return None
 
-        # Detect media type
         num_media = int(payload.get("NumMedia", 0))
         if num_media > 0:
             media_type = payload.get("MediaContentType0", "")
@@ -104,21 +90,6 @@ class WebhookService:
         }
 
     def _normalize_meta(self, payload: dict) -> dict | None:
-        """
-        Meta (WhatsApp Business API) webhook payload shape:
-        {
-          "object": "whatsapp_business_account",
-          "entry": [{
-            "changes": [{
-              "value": {
-                "metadata": {"phone_number_id": "..."},
-                "contacts": [{"profile": {"name": "..."}, "wa_id": "..."}],
-                "messages": [{"id": "...", "from": "...", "text": {"body": "..."}, "type": "text"}]
-              }
-            }]
-          }]
-        }
-        """
         try:
             value = payload["entry"][0]["changes"][0]["value"]
             message_data = value["messages"][0]
@@ -160,7 +131,6 @@ class WebhookService:
     # ── Business Resolution ───────────────────────────────────────────────────
 
     def _resolve_business(self, phone_number_id: str) -> BusinessAccount | None:
-        """Find the BusinessAccount that owns this WhatsApp number."""
         return BusinessAccount.objects.filter(
             phone_number_id=phone_number_id,
             is_active=True,
@@ -171,10 +141,7 @@ class WebhookService:
     def _get_or_create_contact(
         self, business: BusinessAccount, normalized: dict
     ) -> WhatsAppContact:
-        """
-        Find existing contact or create a new one.
-        Updates display_name and last_seen on every inbound message.
-        """
+
         contact, created = WhatsAppContact.objects.get_or_create(
             business=business,
             phone_number=normalized["from_number"],
@@ -183,26 +150,28 @@ class WebhookService:
             },
         )
 
-        # Always refresh last_seen and name
         contact.last_seen = timezone.now()
+
         if normalized.get("display_name") and not contact.display_name:
             contact.display_name = normalized["display_name"]
+
         contact.save(update_fields=["last_seen", "display_name", "updated_at"])
 
         if created:
-            logger.info("New contact created: %s for business: %s", contact.phone_number, business.name)
+            logger.info(
+                "New contact created: %s for business: %s",
+                contact.phone_number,
+                business.name,
+            )
 
         return contact
 
-    # ── Conversation Management ───────────────────────────────────────────────
+    # ── Conversation ─────────────────────────────────────────────────────────
 
     def _get_or_create_conversation(
         self, business: BusinessAccount, contact: WhatsAppContact
     ) -> Conversation:
-        """
-        Get the active (open) conversation or create a fresh one.
-        One open conversation per contact per business at a time.
-        """
+
         conversation = Conversation.objects.filter(
             business=business,
             contact=contact,
@@ -215,11 +184,6 @@ class WebhookService:
                 contact=contact,
                 status=Conversation.Status.OPEN,
             )
-            logger.info(
-                "New conversation started: %s for contact: %s",
-                conversation.id,
-                contact.phone_number,
-            )
 
         return conversation
 
@@ -228,14 +192,10 @@ class WebhookService:
     def _store_message(
         self, conversation: Conversation, normalized: dict, raw_payload: dict
     ) -> Message | None:
-        """
-        Deduplicate by provider_message_id, then store the message.
-        """
+
         provider_id = normalized.get("provider_message_id", "")
 
-        # Deduplication guard — WhatsApp retries on timeout
         if provider_id and Message.objects.filter(provider_message_id=provider_id).exists():
-            logger.info("Duplicate message ignored: %s", provider_id)
             return None
 
         message = Message.objects.create(
@@ -248,15 +208,7 @@ class WebhookService:
             raw_payload=raw_payload,
         )
 
-        # Keep conversation's last_message_at fresh
         conversation.update_last_message_time()
-
-        logger.info(
-            "Message stored: id=%s | from=%s | body='%s'",
-            message.id,
-            normalized["from_number"],
-            normalized["body"][:60],
-        )
 
         return message
 

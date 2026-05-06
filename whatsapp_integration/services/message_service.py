@@ -14,14 +14,9 @@ class MessageSendError(Exception):
 class MessageService:
     """
     Handles sending outbound WhatsApp messages.
-    Responsibilities:
-      - Resolve BusinessAccount
-      - Get or create Contact + Conversation
-      - Call the WhatsApp provider
-      - Store the outbound Message with correct status
-      - Handle failures gracefully
     """
 
+    # ── SYNC SEND ────────────────────────────────────────────────────────────
     def send_message(
         self,
         business_id: str,
@@ -29,25 +24,13 @@ class MessageService:
         body: str,
         message_type: str = Message.MessageType.TEXT,
     ) -> Message:
-        """
-        Send a WhatsApp message from a BusinessAccount to a phone number.
-        Returns the stored Message object.
-        Raises MessageSendError on unrecoverable failures.
-        """
 
-        # ── 1. Resolve Business ───────────────────────────────────────────────
         business = self._get_business(business_id)
-
-        # ── 2. Normalize phone number ─────────────────────────────────────────
         to_number = self._normalize_phone(to_number)
 
-        # ── 3. Get or create Contact ──────────────────────────────────────────
         contact = self._get_or_create_contact(business, to_number)
-
-        # ── 4. Get or create Conversation ─────────────────────────────────────
         conversation = self._get_or_create_conversation(business, contact)
 
-        # ── 5. Create Message record as PENDING ───────────────────────────────
         message = Message.objects.create(
             conversation=conversation,
             direction=Message.Direction.OUTBOUND,
@@ -56,7 +39,6 @@ class MessageService:
             status=Message.Status.PENDING,
         )
 
-        # ── 6. Call WhatsApp Provider ─────────────────────────────────────────
         client = get_whatsapp_client()
         result = client.send_text_message(
             to_number=to_number,
@@ -64,94 +46,144 @@ class MessageService:
             from_number=business.phone_number_id,
         )
 
-        # ── 7. Update Message with provider result ────────────────────────────
         if result.success:
             message.status = Message.Status.SENT
             message.provider_message_id = result.provider_message_id
             message.raw_payload = result.raw_response
-            message.status_updated_at = timezone.now()
-            message.save(update_fields=[
-                "status", "provider_message_id",
-                "raw_payload", "status_updated_at", "updated_at",
-            ])
-            conversation.update_last_message_time()
-            logger.info(
-                "Outbound message sent | id=%s | to=%s | sid=%s",
-                message.id, to_number, result.provider_message_id,
-            )
         else:
             message.status = Message.Status.FAILED
             message.raw_payload = {"error": result.error_message}
-            message.status_updated_at = timezone.now()
-            message.save(update_fields=[
-                "status", "raw_payload",
-                "status_updated_at", "updated_at",
-            ])
-            logger.error(
-                "Outbound message failed | id=%s | to=%s | error=%s",
-                message.id, to_number, result.error_message,
-            )
-            raise MessageSendError(
-                f"Provider rejected message: {result.error_message}"
-            )
+            message.save(update_fields=["status", "raw_payload", "updated_at"])
+            raise MessageSendError(result.error_message)
+
+        message.status_updated_at = timezone.now()
+        message.save(update_fields=[
+            "status",
+            "provider_message_id",
+            "raw_payload",
+            "status_updated_at",
+            "updated_at",
+        ])
+
+        conversation.update_last_message_time()
 
         return message
 
-    def update_message_status(
+    # ── ASYNC SEND (CELERY) ───────────────────────────────────────────────────
+    def send_message_async(
         self,
-        provider_message_id: str,
-        new_status: str,
-    ) -> Message | None:
-        """
-        Called when WhatsApp sends a status callback (delivered, read, failed).
-        Updates the stored message status.
-        """
+        business_id: str,
+        to_number: str,
+        body: str,
+        message_type: str = "text",
+    ) -> dict:
+
+        from ..tasks import send_whatsapp_message_task
+
+        business = self._get_business(business_id)
+        to_number = self._normalize_phone(to_number)
+
+        contact = self._get_or_create_contact(business, to_number)
+        conversation = self._get_or_create_conversation(business, contact)
+
+        message = Message.objects.create(
+            conversation=conversation,
+            direction=Message.Direction.OUTBOUND,
+            message_type=message_type,
+            body=body,
+            status=Message.Status.PENDING,
+        )
+
+        task = send_whatsapp_message_task.apply_async(
+            kwargs={
+                "business_id": business_id,
+                "to_number": to_number,
+                "body": body,
+                "message_type": message_type,
+                "message_id": str(message.id),
+            },
+            queue="messages",
+        )
+
+        logger.info(
+            "Message queued | message_id=%s | task_id=%s | to=%s",
+            message.id, task.id, to_number,
+        )
+
+        return {
+            "message_id": str(message.id),
+            "task_id": task.id,
+            "status": "queued",
+            "to_number": to_number,
+        }
+
+    # ── CALLED BY CELERY WORKER ──────────────────────────────────────────────
+    def _call_provider_and_update(self, message) -> bool:
+        client = get_whatsapp_client()
+
+        result = client.send_text_message(
+            to_number=message.conversation.contact.phone_number,
+            body=message.body,
+            from_number=message.conversation.business.phone_number_id,
+        )
+
+        if result.success:
+            message.status = Message.Status.SENT
+            message.provider_message_id = result.provider_message_id
+            message.raw_payload = result.raw_response
+        else:
+            message.status = Message.Status.FAILED
+            message.raw_payload = {"error": result.error_message}
+            message.save(update_fields=["status", "raw_payload", "updated_at"])
+            raise MessageSendError(result.error_message)
+
+        message.status_updated_at = timezone.now()
+        message.save(update_fields=[
+            "status",
+            "provider_message_id",
+            "raw_payload",
+            "status_updated_at",
+            "updated_at",
+        ])
+
+        message.conversation.update_last_message_time()
+
+        return True
+
+    # ── STATUS CALLBACK ──────────────────────────────────────────────────────
+    def update_message_status(self, provider_message_id: str, new_status: str):
         try:
             message = Message.objects.get(provider_message_id=provider_message_id)
             message.status = new_status
             message.status_updated_at = timezone.now()
             message.save(update_fields=["status", "status_updated_at", "updated_at"])
-            logger.info(
-                "Message status updated | id=%s | status=%s",
-                message.id, new_status,
-            )
             return message
         except Message.DoesNotExist:
-            logger.warning(
-                "Status update for unknown provider_message_id: %s", provider_message_id
-            )
+            logger.warning("Unknown provider_message_id: %s", provider_message_id)
             return None
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
+    # ── HELPERS ──────────────────────────────────────────────────────────────
     def _get_business(self, business_id: str) -> BusinessAccount:
         try:
             return BusinessAccount.objects.get(id=business_id, is_active=True)
         except BusinessAccount.DoesNotExist:
-            raise MessageSendError(f"BusinessAccount not found or inactive: {business_id}")
+            raise MessageSendError(f"BusinessAccount not found: {business_id}")
 
     def _normalize_phone(self, phone: str) -> str:
-        """Ensure E.164 format — strip spaces, ensure leading +."""
         phone = phone.strip().replace(" ", "")
         if not phone.startswith("+"):
             phone = f"+{phone}"
         return phone
 
-    def _get_or_create_contact(
-        self, business: BusinessAccount, phone_number: str
-    ) -> WhatsAppContact:
+    def _get_or_create_contact(self, business, phone_number):
         contact, created = WhatsAppContact.objects.get_or_create(
             business=business,
             phone_number=phone_number,
             defaults={"display_name": ""},
         )
-        if created:
-            logger.info("New contact created via outbound: %s", phone_number)
         return contact
 
-    def _get_or_create_conversation(
-        self, business: BusinessAccount, contact: WhatsAppContact
-    ) -> Conversation:
+    def _get_or_create_conversation(self, business, contact):
         conversation = Conversation.objects.filter(
             business=business,
             contact=contact,
@@ -164,6 +196,5 @@ class MessageService:
                 contact=contact,
                 status=Conversation.Status.OPEN,
             )
-            logger.info("New conversation opened for outbound: %s", contact.phone_number)
 
         return conversation
