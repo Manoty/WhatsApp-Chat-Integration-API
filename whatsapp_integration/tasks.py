@@ -296,3 +296,60 @@ def send_whatsapp_media_task(
             self.request.retries + 1, exc, retry_delay,
         )
         raise self.retry(exc=exc, countdown=retry_delay)
+    
+# ─── Send Template Task ───────────────────────────────────────────────────────
+
+@shared_task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,
+    name="whatsapp.send_template",
+    queue="messages",
+)
+def send_template_task(
+    self,
+    business_id: str,
+    to_number: str,
+    template_name: str,
+    variables: list,
+    language: str = "en",
+):
+    """
+    Async task: send a WhatsApp template message.
+    Used for both single sends and bulk send groups.
+    Retries up to 3 times with exponential backoff.
+    """
+    from .services.template_service import TemplateService, TemplateError
+
+    logger.info(
+        "Template task started | template=%s | to=%s | attempt=%d",
+        template_name, to_number, self.request.retries + 1,
+    )
+
+    try:
+        svc = TemplateService()
+        template_send = svc.send_template(
+            business_id=business_id,
+            to_number=to_number,
+            template_name=template_name,
+            variables=variables,
+            language=language,
+        )
+        return {
+            "status":           "sent",
+            "template_send_id": str(template_send.id),
+            "to_number":        to_number,
+            "template_name":    template_name,
+        }
+
+    except TemplateError as exc:
+        logger.warning(
+            "Template task failed (attempt %d) | error=%s",
+            self.request.retries + 1, exc,
+        )
+        retry_delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=retry_delay)
+
+    except Exception as exc:
+        logger.exception("Unexpected template task error: %s", exc)
+        raise self.retry(exc=exc, countdown=60)    
