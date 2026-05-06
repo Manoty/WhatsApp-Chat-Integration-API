@@ -12,6 +12,13 @@ from .services.webhook_service import WebhookService
 from .serializers import SendMessageRequestSerializer
 from .services.message_service import MessageService, MessageSendError
 
+from .models import Conversation, WhatsAppContact
+from .serializers import (
+    ConversationSerializer,
+    MessageSerializer,
+    WhatsAppContactSerializer,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -229,3 +236,228 @@ def message_status_callback(request):
         })
 
     return Response({"status": "not_found"}, status=200)
+
+
+# ─── Conversations ────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+def conversation_list(request):
+    """
+    List all conversations with filtering support.
+
+    GET /api/conversations/
+    Query params:
+      ?business_id=<uuid>     filter by business
+      ?status=open|closed     filter by status
+      ?phone=+254712345678    filter by contact phone number
+      ?page=1                 pagination (20 per page)
+    """
+    queryset = Conversation.objects.select_related(
+        "business", "contact"
+    ).prefetch_related("messages")
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    business_id = request.GET.get("business_id")
+    if business_id:
+        queryset = queryset.filter(business__id=business_id)
+
+    conv_status = request.GET.get("status")
+    if conv_status:
+        queryset = queryset.filter(status=conv_status)
+
+    phone = request.GET.get("phone")
+    if phone:
+        queryset = queryset.filter(contact__phone_number__icontains=phone)
+
+    # ── Pagination ────────────────────────────────────────────────────────────
+    page, page_size = _get_pagination(request)
+    total = queryset.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    conversations = queryset[start:end]
+
+    return Response({
+        "count": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "results": ConversationSerializer(conversations, many=True).data,
+    })
+
+
+@api_view(["GET", "PATCH"])
+def conversation_detail(request, conversation_id):
+    """
+    Retrieve or update a single conversation.
+
+    GET  /api/conversations/<id>/
+    PATCH /api/conversations/<id>/   — update status or assigned_to
+    {
+        "status": "closed",
+        "assigned_to": "agent@example.com"
+    }
+    """
+    try:
+        conversation = Conversation.objects.select_related(
+            "business", "contact"
+        ).prefetch_related("messages").get(id=conversation_id)
+    except Conversation.DoesNotExist:
+        return Response(
+            {"error": "Conversation not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if request.method == "PATCH":
+        allowed_fields = {"status", "assigned_to"}
+        updates = {k: v for k, v in request.data.items() if k in allowed_fields}
+
+        if "status" in updates:
+            valid_statuses = [s.value for s in Conversation.Status]
+            if updates["status"] not in valid_statuses:
+                return Response(
+                    {"error": f"Invalid status. Choose from: {valid_statuses}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        for field, value in updates.items():
+            setattr(conversation, field, value)
+        conversation.save(update_fields=list(updates.keys()) + ["updated_at"])
+        logger.info("Conversation %s updated: %s", conversation_id, updates)
+
+    return Response(ConversationSerializer(conversation).data)
+
+
+@api_view(["GET"])
+def conversation_messages(request, conversation_id):
+    """
+    Get all messages in a conversation — the full chat thread.
+
+    GET /api/conversations/<id>/messages/
+    Query params:
+      ?direction=inbound|outbound    filter by direction
+      ?page=1                        pagination (50 per page)
+    """
+    try:
+        conversation = Conversation.objects.select_related(
+            "business", "contact"
+        ).get(id=conversation_id)
+    except Conversation.DoesNotExist:
+        return Response(
+            {"error": "Conversation not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    messages_qs = conversation.messages.all().order_by("created_at")
+
+    # ── Direction filter ──────────────────────────────────────────────────────
+    direction = request.GET.get("direction")
+    if direction in ["inbound", "outbound"]:
+        messages_qs = messages_qs.filter(direction=direction)
+
+    # ── Pagination ────────────────────────────────────────────────────────────
+    page, page_size = _get_pagination(request, default_size=50)
+    total = messages_qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    messages = messages_qs[start:end]
+
+    return Response({
+        "conversation": {
+            "id": str(conversation.id),
+            "status": conversation.status,
+            "contact": conversation.contact.phone_number,
+            "contact_name": conversation.contact.display_name,
+            "business": conversation.business.name,
+        },
+        "count": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "results": MessageSerializer(messages, many=True).data,
+    })
+
+
+# ─── Contacts ─────────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+def contact_list(request):
+    """
+    List all contacts.
+
+    GET /api/contacts/
+    Query params:
+      ?business_id=<uuid>     filter by business
+      ?phone=+254             search by phone prefix
+      ?name=john              search by display name
+      ?page=1
+    """
+    queryset = WhatsAppContact.objects.select_related("business").all()
+
+    business_id = request.GET.get("business_id")
+    if business_id:
+        queryset = queryset.filter(business__id=business_id)
+
+    phone = request.GET.get("phone")
+    if phone:
+        queryset = queryset.filter(phone_number__icontains=phone)
+
+    name = request.GET.get("name")
+    if name:
+        queryset = queryset.filter(display_name__icontains=name)
+
+    page, page_size = _get_pagination(request)
+    total = queryset.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    contacts = queryset[start:end]
+
+    return Response({
+        "count": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "results": WhatsAppContactSerializer(contacts, many=True).data,
+    })
+
+
+@api_view(["GET"])
+def contact_detail(request, contact_id):
+    """
+    Get a single contact and all their conversations.
+
+    GET /api/contacts/<id>/
+    """
+    try:
+        contact = WhatsAppContact.objects.select_related("business").get(id=contact_id)
+    except WhatsAppContact.DoesNotExist:
+        return Response(
+            {"error": "Contact not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    conversations = Conversation.objects.filter(
+        contact=contact
+    ).prefetch_related("messages").order_by("-last_message_at")
+
+    return Response({
+        "contact": WhatsAppContactSerializer(contact).data,
+        "conversations": ConversationSerializer(conversations, many=True).data,
+        "total_messages": Message.objects.filter(
+            conversation__contact=contact
+        ).count(),
+    })
+
+
+# ─── Shared Pagination Helper ─────────────────────────────────────────────────
+
+def _get_pagination(request, default_size: int = 20) -> tuple[int, int]:
+    """Extract and clamp page + page_size from query params."""
+    try:
+        page = max(1, int(request.GET.get("page", 1)))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        page_size = min(100, max(1, int(request.GET.get("page_size", default_size))))
+    except (ValueError, TypeError):
+        page_size = default_size
+    return page, page_size
