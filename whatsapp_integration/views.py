@@ -18,6 +18,8 @@ from .serializers import (
     MessageSerializer,
     WhatsAppContactSerializer,
 )
+from .models import AutoReplyRule
+from .serializers import AutoReplyRuleSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -461,3 +463,166 @@ def _get_pagination(request, default_size: int = 20) -> tuple[int, int]:
     except (ValueError, TypeError):
         page_size = default_size
     return page, page_size
+
+
+# ─── Auto Reply Rules ─────────────────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+def auto_reply_rule_list(request):
+    """
+    List all rules or create a new rule.
+
+    GET  /api/auto-replies/
+    POST /api/auto-replies/
+    {
+        "business": "<uuid>",
+        "name": "Pricing Reply",
+        "keyword": "pricing",
+        "match_type": "contains",
+        "reply_text": "Our plans start at KES 1,500/month. Visit example.com/pricing",
+        "priority": 1,
+        "is_fallback": false
+    }
+    """
+    if request.method == "GET":
+        queryset = AutoReplyRule.objects.select_related("business").all()
+
+        # Filter by business
+        business_id = request.GET.get("business_id")
+        if business_id:
+            queryset = queryset.filter(business__id=business_id)
+
+        # Filter active only
+        active_only = request.GET.get("active")
+        if active_only == "true":
+            queryset = queryset.filter(is_active=True)
+
+        return Response(AutoReplyRuleSerializer(queryset, many=True).data)
+
+    # POST — create new rule
+    serializer = AutoReplyRuleSerializer(data=request.data)
+    if serializer.is_valid():
+        rule = serializer.save()
+        logger.info(
+            "AutoReplyRule created | id=%s | name='%s' | business=%s",
+            rule.id, rule.name, rule.business.name,
+        )
+        return Response(
+            AutoReplyRuleSerializer(rule).data,
+            status=status.HTTP_201_CREATED,
+        )
+    return Response(
+        {"status": "error", "errors": serializer.errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+def auto_reply_rule_detail(request, rule_id):
+    """
+    Retrieve, update, or delete a single AutoReplyRule.
+
+    GET    /api/auto-replies/<id>/
+    PUT    /api/auto-replies/<id>/   — full update
+    PATCH  /api/auto-replies/<id>/   — partial update
+    DELETE /api/auto-replies/<id>/
+    """
+    try:
+        rule = AutoReplyRule.objects.select_related("business").get(id=rule_id)
+    except AutoReplyRule.DoesNotExist:
+        return Response(
+            {"error": "AutoReplyRule not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if request.method == "GET":
+        return Response(AutoReplyRuleSerializer(rule).data)
+
+    if request.method == "DELETE":
+        rule_name = rule.name
+        rule.delete()
+        logger.info("AutoReplyRule deleted | name='%s'", rule_name)
+        return Response(
+            {"status": "deleted", "name": rule_name},
+            status=status.HTTP_200_OK,
+        )
+
+    # PUT or PATCH
+    partial = request.method == "PATCH"
+    serializer = AutoReplyRuleSerializer(rule, data=request.data, partial=partial)
+    if serializer.is_valid():
+        updated = serializer.save()
+        return Response(AutoReplyRuleSerializer(updated).data)
+
+    return Response(
+        {"status": "error", "errors": serializer.errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@api_view(["POST"])
+def test_auto_reply(request):
+    """
+    Dry-run endpoint — test which rule would fire for a given message
+    WITHOUT actually sending anything.
+
+    POST /api/auto-replies/test/
+    {
+        "business_id": "<uuid>",
+        "message": "I want to know about pricing"
+    }
+    """
+    business_id = request.data.get("business_id")
+    message_body = request.data.get("message", "").strip()
+
+    if not business_id or not message_body:
+        return Response(
+            {"error": "Both business_id and message are required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        business = BusinessAccount.objects.get(id=business_id, is_active=True)
+    except BusinessAccount.DoesNotExist:
+        return Response(
+            {"error": "BusinessAccount not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Run the matcher logic without sending anything
+    from .services.auto_reply_engine import AutoReplyEngine
+    engine = AutoReplyEngine()
+
+    rules = AutoReplyRule.objects.filter(
+        business=business,
+        is_active=True,
+        is_fallback=False,
+    ).order_by("priority", "created_at")
+
+    matched_rule = None
+    for rule in rules:
+        if engine._matches(rule, message_body):
+            matched_rule = rule
+            break
+
+    if not matched_rule:
+        matched_rule = AutoReplyRule.objects.filter(
+            business=business,
+            is_active=True,
+            is_fallback=True,
+        ).order_by("priority").first()
+
+    if matched_rule:
+        return Response({
+            "matched": True,
+            "rule": AutoReplyRuleSerializer(matched_rule).data,
+            "would_reply_with": matched_rule.reply_text,
+            "is_fallback": matched_rule.is_fallback,
+        })
+
+    return Response({
+        "matched": False,
+        "rule": None,
+        "would_reply_with": None,
+        "reason": "No matching rule and no fallback configured",
+    })
