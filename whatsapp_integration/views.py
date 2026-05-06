@@ -17,6 +17,14 @@ from .serializers import (
     WhatsAppContactSerializer,
     AutoReplyRuleSerializer,
 )
+from .models import MessageTemplate, TemplateSend
+from .serializers import (
+    MessageTemplateSerializer,
+    TemplateSendSerializer,
+    SendTemplateRequestSerializer,
+    BulkSendTemplateRequestSerializer,
+)
+from .services.template_service import TemplateService, TemplateError
 
 from .models import MediaAttachment
 from .serializers import SendMediaRequestSerializer, MediaAttachmentSerializer
@@ -697,3 +705,353 @@ def conversation_media(request, conversation_id):
         "total_pages":     max(1, (total + page_size - 1) // page_size),
         "results":         MediaAttachmentSerializer(subset, many=True).data,
     })
+    
+# ─── Templates: CRUD ─────────────────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def template_list(request):
+    """
+    List all templates or create a new one.
+
+    GET  /api/templates/
+    POST /api/templates/
+    {
+        "business": "<uuid>",
+        "name": "Order Confirmation",
+        "template_name": "order_confirmation",
+        "category": "utility",
+        "language": "en",
+        "body": "Hello {{1}}, your order {{2}} for {{3}} is confirmed! 🎉",
+        "footer_text": "Reply STOP to unsubscribe"
+    }
+    """
+    if request.method == "GET":
+        qs = MessageTemplate.objects.select_related("business").all()
+
+        business_id = request.GET.get("business_id")
+        if business_id:
+            qs = qs.filter(business__id=business_id)
+
+        status_filter = request.GET.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        category = request.GET.get("category")
+        if category:
+            qs = qs.filter(category=category)
+
+        return Response(MessageTemplateSerializer(qs, many=True).data)
+
+    serializer = MessageTemplateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    template = serializer.save()
+    logger.info(
+        "Template created | id=%s | name=%s", template.id, template.name
+    )
+    return Response(
+        MessageTemplateSerializer(template).data,
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def template_detail(request, template_id):
+    """
+    Retrieve, update, or delete a single template.
+
+    GET    /api/templates/<id>/
+    PATCH  /api/templates/<id>/
+    DELETE /api/templates/<id>/
+    """
+    try:
+        template = MessageTemplate.objects.select_related("business").get(
+            id=template_id
+        )
+    except MessageTemplate.DoesNotExist:
+        return Response(
+            {"error": "Template not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if request.method == "GET":
+        return Response(MessageTemplateSerializer(template).data)
+
+    if request.method == "DELETE":
+        if template.status == MessageTemplate.Status.APPROVED:
+            return Response(
+                {"error": "Cannot delete an approved template. "
+                          "Archive it by setting status to 'disabled' instead."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        name = template.name
+        template.delete()
+        return Response({"status": "deleted", "name": name})
+
+    partial = request.method == "PATCH"
+    serializer = MessageTemplateSerializer(
+        template, data=request.data, partial=partial
+    )
+    if serializer.is_valid():
+        return Response(
+            MessageTemplateSerializer(serializer.save()).data
+        )
+    return Response(
+        {"status": "error", "errors": serializer.errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def template_submit(request, template_id):
+    """
+    Submit a DRAFT template for provider approval.
+    In mock mode: auto-approves immediately.
+
+    POST /api/templates/<id>/submit/
+    """
+    try:
+        template = MessageTemplate.objects.get(id=template_id)
+    except MessageTemplate.DoesNotExist:
+        return Response(
+            {"error": "Template not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if template.status not in (
+        MessageTemplate.Status.DRAFT,
+        MessageTemplate.Status.REJECTED,
+    ):
+        return Response(
+            {"error": f"Only DRAFT or REJECTED templates can be submitted. "
+                      f"Current status: {template.status}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    svc = TemplateService()
+    template = svc.submit_for_approval(template)
+
+    return Response({
+        "status":               "submitted",
+        "template_id":          str(template.id),
+        "template_status":      template.status,
+        "provider_template_id": template.provider_template_id,
+    })
+
+
+# ─── Templates: Send ─────────────────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([SendMessageRateThrottle])
+def template_send(request):
+    """
+    Send an approved template to a single contact.
+
+    POST /api/templates/send/
+    {
+        "business_id": "<uuid>",
+        "to_number": "+254712345678",
+        "template_name": "order_confirmation",
+        "language": "en",
+        "variables": ["John", "ORD-001", "KES 2,500"]
+    }
+    """
+    serializer = SendTemplateRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    v = serializer.validated_data
+
+    try:
+        # Queue as Celery task — returns immediately
+        from .tasks import send_template_task
+        task = send_template_task.apply_async(
+            kwargs={
+                "business_id":   str(v["business_id"]),
+                "to_number":     v["to_number"],
+                "template_name": v["template_name"],
+                "variables":     v["variables"],
+                "language":      v["language"],
+            },
+            queue="messages",
+        )
+
+        return Response(
+            {
+                "status":        "queued",
+                "task_id":       task.id,
+                "template_name": v["template_name"],
+                "to_number":     v["to_number"],
+                "variables":     v["variables"],
+                "note": "Track delivery via /api/tasks/<task_id>/",
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    except TemplateError as exc:
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as exc:
+        logger.exception("Template send error: %s", exc)
+        return Response(
+            {"status": "error", "message": "Internal server error"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def template_bulk_send(request):
+    """
+    Send an approved template to multiple contacts via Celery group.
+    Max 1,000 recipients per request.
+
+    POST /api/templates/send/bulk/
+    {
+        "business_id": "<uuid>",
+        "template_name": "order_confirmation",
+        "language": "en",
+        "recipients": [
+            {"to_number": "+254712345678", "variables": ["John", "ORD-001", "KES 2,500"]},
+            {"to_number": "+254798765432", "variables": ["Jane", "ORD-002", "KES 3,000"]}
+        ]
+    }
+    """
+    serializer = BulkSendTemplateRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    v = serializer.validated_data
+
+    try:
+        svc    = TemplateService()
+        result = svc.queue_bulk_send(
+            business_id=str(v["business_id"]),
+            template_name=v["template_name"],
+            language=v["language"],
+            recipients=v["recipients"],
+        )
+        return Response(result, status=status.HTTP_202_ACCEPTED)
+
+    except TemplateError as exc:
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as exc:
+        logger.exception("Bulk template send error: %s", exc)
+        return Response(
+            {"status": "error", "message": "Internal server error"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def template_send_history(request, template_id):
+    """
+    Get the send history for a specific template.
+
+    GET /api/templates/<id>/history/
+    Query params:
+      ?status=sent|delivered|failed
+      ?page=1
+    """
+    try:
+        template = MessageTemplate.objects.get(id=template_id)
+    except MessageTemplate.DoesNotExist:
+        return Response(
+            {"error": "Template not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    sends = TemplateSend.objects.filter(
+        template=template
+    ).select_related("contact").order_by("-created_at")
+
+    status_filter = request.GET.get("status")
+    if status_filter:
+        sends = sends.filter(status=status_filter)
+
+    page, page_size = _get_pagination(request)
+    total  = sends.count()
+    start  = (page - 1) * page_size
+    subset = sends[start:start + page_size]
+
+    return Response({
+        "template":    MessageTemplateSerializer(template).data,
+        "count":       total,
+        "page":        page,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "results":     TemplateSendSerializer(subset, many=True).data,
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def template_preview(request):
+    """
+    Preview a rendered template without sending it.
+
+    POST /api/templates/preview/
+    {
+        "business_id": "<uuid>",
+        "template_name": "order_confirmation",
+        "language": "en",
+        "variables": ["John", "ORD-001", "KES 2,500"]
+    }
+    """
+    business_id   = request.data.get("business_id")
+    template_name = request.data.get("template_name")
+    language      = request.data.get("language", "en")
+    variables     = request.data.get("variables", [])
+
+    if not business_id or not template_name:
+        return Response(
+            {"error": "business_id and template_name are required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        business = BusinessAccount.objects.get(
+            id=business_id, is_active=True
+        )
+        template = MessageTemplate.objects.get(
+            business=business,
+            template_name=template_name,
+            language=language,
+        )
+    except (BusinessAccount.DoesNotExist, MessageTemplate.DoesNotExist) as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    rendered = template.render(variables)
+
+    return Response({
+        "template_name":   template.template_name,
+        "language":        template.language,
+        "status":          template.status,
+        "variable_count":  template.variable_count,
+        "variables_given": len(variables),
+        "original_body":   template.body,
+        "rendered_body":   rendered,
+        "ready_to_send":   template.status == MessageTemplate.Status.APPROVED,
+    })    
