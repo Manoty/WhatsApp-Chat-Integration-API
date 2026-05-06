@@ -7,6 +7,8 @@ from .models import (
     Message,
     AutoReplyRule,
     MediaAttachment,
+    MessageTemplate,
+    TemplateSend,
 )
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
