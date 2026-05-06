@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import BusinessAccount, WhatsAppContact, Conversation, Message
  
 from .models import AutoReplyRule
+from .models import MediaAttachment
 
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(admin.ModelAdmin):
@@ -43,3 +44,11 @@ class AutoReplyRuleAdmin(admin.ModelAdmin):
     search_fields = ("name", "keyword", "reply_text")
     readonly_fields = ("trigger_count", "created_at", "updated_at")
     ordering = ("business", "priority")    
+    
+@admin.register(MediaAttachment)
+class MediaAttachmentAdmin(admin.ModelAdmin):
+    list_display  = ("id", "category", "mime_type", "file_name",
+                     "file_size", "is_downloaded", "created_at")
+    list_filter   = ("category", "is_downloaded")
+    search_fields = ("file_name", "mime_type", "provider_media_id")
+    readonly_fields = ("created_at", "updated_at")    
