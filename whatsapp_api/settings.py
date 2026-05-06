@@ -2,17 +2,16 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# ─── Load .env ────────────────────────────────────────────────────────────────
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# ─── Security ─────────────────────────────────────────────────────────────────
-SECRET_KEY = os.getenv("SECRET_KEY", "unsafe-default-key")
+# ─── Core ─────────────────────────────────────────────────────────────────────
+SECRET_KEY = os.getenv("SECRET_KEY", "unsafe-default-key-change-in-production")
 DEBUG = os.getenv("DEBUG", "False") == "True"
-ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost").split(",")
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 
-# ─── Installed Apps ───────────────────────────────────────────────────────────
+# ─── Apps ─────────────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -22,12 +21,14 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     # Third-party
     "rest_framework",
+    "corsheaders",
     # Our apps
     "whatsapp_integration",
 ]
 
-# ─── Middleware ───────────────────────────────────────────────────────────────
+# ─── Middleware — ORDER MATTERS ───────────────────────────────────────────────
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",           # Must be first
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -35,6 +36,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "whatsapp_integration.middleware.RequestLoggingMiddleware",  # Custom — Phase 7
 ]
 
 ROOT_URLCONF = "whatsapp_api.urls"
@@ -57,7 +59,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "whatsapp_api.wsgi.application"
 
-# ─── Database (SQLite for now, PostgreSQL-ready) ──────────────────────────────
+# ─── Database ─────────────────────────────────────────────────────────────────
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
@@ -65,7 +67,21 @@ DATABASES = {
     }
 }
 
-# ─── Auth Validators ──────────────────────────────────────────────────────────
+# PostgreSQL — uncomment for production:
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "django.db.backends.postgresql",
+#         "NAME": os.getenv("DB_NAME", "whatsapp_db"),
+#         "USER": os.getenv("DB_USER", "postgres"),
+#         "PASSWORD": os.getenv("DB_PASSWORD", ""),
+#         "HOST": os.getenv("DB_HOST", "localhost"),
+#         "PORT": os.getenv("DB_PORT", "5432"),
+#         "CONN_MAX_AGE": 60,
+#         "OPTIONS": {"sslmode": os.getenv("DB_SSLMODE", "prefer")},
+#     }
+# }
+
+# ─── Auth ─────────────────────────────────────────────────────────────────────
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -73,13 +89,11 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-# ─── Internationalization ─────────────────────────────────────────────────────
+# ─── i18n ─────────────────────────────────────────────────────────────────────
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
-
-# ─── Static Files ─────────────────────────────────────────────────────────────
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -92,44 +106,99 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.JSONParser",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.SessionAuthentication",
+        "whatsapp_integration.authentication.APIKeyAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",  # Tightened in Phase 7
+        "rest_framework.permissions.IsAuthenticated",
     ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/minute",
+        "user": "300/minute",
+        "webhook": "120/minute",
+        "send_message": "60/minute",
+    },
+    "EXCEPTION_HANDLER": "whatsapp_integration.exceptions.custom_exception_handler",
 }
 
-# ─── WhatsApp Config ──────────────────────────────────────────────────────────
+# ─── CORS ─────────────────────────────────────────────────────────────────────
+CORS_ALLOWED_ORIGINS = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000",
+).split(",")
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+# ─── Security Headers ─────────────────────────────────────────────────────────
+if not DEBUG:
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = "DENY"
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+# ─── WhatsApp / Twilio Config ─────────────────────────────────────────────────
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "my_verify_token")
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "https://api.twilio.com")
+WHATSAPP_MOCK_MODE = os.getenv("WHATSAPP_MOCK_MODE", "True") == "True"
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+
+# Twilio signature validation
+TWILIO_WEBHOOK_VALIDATE = os.getenv("TWILIO_WEBHOOK_VALIDATE", "False") == "True"
+
+# Meta webhook app secret for signature validation
+META_APP_SECRET = os.getenv("META_APP_SECRET", "")
+
+# Internal API key header name
+API_KEY_HEADER = "X-API-Key"
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
+        "json": {
+            "()": "whatsapp_integration.logging_formatters.JSONFormatter",
+        },
         "verbose": {
             "format": "[{asctime}] {levelname} {name} — {message}",
             "style": "{",
         },
     },
+    "filters": {
+        "require_debug_false": {
+            "()": "django.utils.log.RequireDebugFalse",
+        },
+    },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            "formatter": "verbose",
+            "formatter": "json" if not DEBUG else "verbose",
         },
     },
     "root": {
         "handlers": ["console"],
-        "level": "INFO",
+        "level": LOG_LEVEL,
     },
     "loggers": {
         "whatsapp_integration": {
             "handlers": ["console"],
-            "level": "DEBUG",
+            "level": "DEBUG" if DEBUG else LOG_LEVEL,
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
             "propagate": False,
         },
     },
 }
-
-WHATSAPP_MOCK_MODE = os.getenv("WHATSAPP_MOCK_MODE", "True") == "True"
