@@ -366,4 +366,195 @@ class MediaAttachment(TimeStampedModel):
         return (
             f"[{self.category}] {self.file_name or self.mime_type} "
             f"| msg={self.message_id}"
+        )  
+        
+      
+# ─── Template Layer ───────────────────────────────────────────────────────────
+
+class MessageTemplate(TimeStampedModel):
+    """
+    A WhatsApp message template scoped to a BusinessAccount.
+
+    Templates must be approved by Meta before sending.
+    In Twilio, pre-approved templates are identified by name.
+
+    Variable placeholders use {{1}}, {{2}}, {{3}} notation.
+    Example body: "Hello {{1}}, your order {{2}} is ready!"
+    """
+
+    class Status(models.TextChoices):
+        DRAFT    = "draft",    "Draft"       # not yet submitted
+        PENDING  = "pending",  "Pending"     # submitted, awaiting Meta review
+        APPROVED = "approved", "Approved"    # ready to send
+        REJECTED = "rejected", "Rejected"    # Meta rejected it
+        PAUSED   = "paused",   "Paused"      # approved but paused by Meta
+        DISABLED = "disabled", "Disabled"    # disabled by Meta
+
+    class Category(models.TextChoices):
+        MARKETING     = "marketing",     "Marketing"
+        UTILITY       = "utility",       "Utility"
+        AUTHENTICATION = "authentication", "Authentication"
+
+    class Language(models.TextChoices):
+        ENGLISH    = "en",    "English"
+        ENGLISH_US = "en_US", "English (US)"
+        SWAHILI    = "sw",    "Swahili"
+        FRENCH     = "fr",    "French"
+        ARABIC     = "ar",    "Arabic"
+        SPANISH    = "es",    "Spanish"
+        PORTUGUESE = "pt_BR", "Portuguese (Brazil)"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(
+        BusinessAccount,
+        on_delete=models.CASCADE,
+        related_name="templates",
+    )
+    # Human-readable name for our system
+    name = models.CharField(
+        max_length=255,
+        help_text="Internal name e.g. 'Order Confirmation'",
+    )
+    # Provider-side template name (snake_case, Meta requirement)
+    template_name = models.CharField(
+        max_length=512,
+        help_text="Provider template name e.g. 'order_confirmation' (snake_case)",
+    )
+    category = models.CharField(
+        max_length=30,
+        choices=Category.choices,
+        default=Category.UTILITY,
+    )
+    language = models.CharField(
+        max_length=10,
+        choices=Language.choices,
+        default=Language.ENGLISH,
+    )
+    # The template body with {{1}} {{2}} variable placeholders
+    body = models.TextField(
+        help_text="Template body with {{1}}, {{2}} placeholders",
+    )
+    # Header (optional — text, image, video, document)
+    header_text = models.CharField(max_length=60, blank=True, default="")
+    header_media_url = models.URLField(max_length=2048, blank=True, default="")
+    # Footer (optional)
+    footer_text = models.CharField(max_length=60, blank=True, default="")
+    # Number of variables in this template (auto-calculated on save)
+    variable_count = models.PositiveIntegerField(default=0, editable=False)
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT,
+    )
+    # Meta's own template ID (returned after submission)
+    provider_template_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+    )
+    rejection_reason = models.TextField(blank=True, default="")
+    # Analytics
+    send_count    = models.PositiveIntegerField(default=0, editable=False)
+    success_count = models.PositiveIntegerField(default=0, editable=False)
+
+    class Meta:
+        db_table = "message_templates"
+        ordering = ["-created_at"]
+        unique_together = ("business", "template_name", "language")
+
+    def __str__(self):
+        return f"[{self.status.upper()}] {self.name} ({self.language})"
+
+    def save(self, *args, **kwargs):
+        # Auto-count variables on every save
+        import re
+        self.variable_count = len(re.findall(r"\{\{\d+\}\}", self.body))
+        super().save(*args, **kwargs)
+
+    def render(self, variables: list[str]) -> str:
+        """
+        Replace {{1}}, {{2}}, ... with provided variable values.
+        Returns the rendered message body.
+        """
+        import re
+        rendered = self.body
+        for i, value in enumerate(variables, start=1):
+            rendered = rendered.replace(f"{{{{{i}}}}}", str(value))
+        # Warn if any placeholders remain unfilled
+        remaining = re.findall(r"\{\{\d+\}\}", rendered)
+        if remaining:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Template '%s' has unfilled variables: %s",
+                self.template_name, remaining,
+            )
+        return rendered
+
+    def increment_send_count(self, success: bool = True):
+        """Thread-safe counters."""
+        MessageTemplate.objects.filter(id=self.id).update(
+            send_count=models.F("send_count") + 1
+        )
+        if success:
+            MessageTemplate.objects.filter(id=self.id).update(
+                success_count=models.F("success_count") + 1
+            )
+
+
+class TemplateSend(TimeStampedModel):
+    """
+    Tracks every individual template send attempt.
+    One record per send — lets us audit who got what template and when.
+    """
+
+    class Status(models.TextChoices):
+        QUEUED    = "queued",    "Queued"
+        SENT      = "sent",      "Sent"
+        DELIVERED = "delivered", "Delivered"
+        READ      = "read",      "Read"
+        FAILED    = "failed",    "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    template = models.ForeignKey(
+        MessageTemplate,
+        on_delete=models.CASCADE,
+        related_name="sends",
+    )
+    message = models.OneToOneField(
+        Message,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="template_send",
+        help_text="The Message record created when this template was sent",
+    )
+    contact = models.ForeignKey(
+        WhatsAppContact,
+        on_delete=models.CASCADE,
+        related_name="template_sends",
+    )
+    # The actual variables used in this send
+    variables      = models.JSONField(default=list)
+    rendered_body  = models.TextField(blank=True, default="")
+    status         = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.QUEUED,
+    )
+    provider_message_id = models.CharField(
+        max_length=255, blank=True, default="", db_index=True
+    )
+    error_message  = models.TextField(blank=True, default="")
+    sent_at        = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "template_sends"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.template.name} → {self.contact.phone_number} "
+            f"[{self.status}]"
         )        
+              
