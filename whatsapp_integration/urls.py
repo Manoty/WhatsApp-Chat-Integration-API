@@ -23,4 +23,9 @@ urlpatterns = [
     # ── Contacts ──────────────────────────────────────────────────────────────
     path("contacts/", views.contact_list, name="contact-list"),
     path("contacts/<uuid:contact_id>/", views.contact_detail, name="contact-detail"),
+
+    # ── Auto Reply Rules ──────────────────────────────────────────────────────
+    path("auto-replies/", views.auto_reply_rule_list, name="auto-reply-list"),
+    path("auto-replies/test/", views.test_auto_reply, name="auto-reply-test"),
+    path("auto-replies/<uuid:rule_id>/", views.auto_reply_rule_detail, name="auto-reply-detail"),
 ]
