@@ -6,6 +6,7 @@ from .models import (
     Conversation,
     Message,
     AutoReplyRule,
+    MediaAttachment,
 )
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
@@ -142,4 +143,50 @@ class AutoReplyRuleSerializer(serializers.ModelSerializer):
 
         return data
 
+
+class MediaAttachmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MediaAttachment
+        fields = [
+            "id", "category", "media_url", "provider_media_id",
+            "mime_type", "file_name", "file_size", "caption",
+            "stored_url", "is_downloaded", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class SendMediaRequestSerializer(serializers.Serializer):
+    """Validates POST /api/messages/send/media/"""
+    business_id = serializers.UUIDField()
+    to_number   = serializers.CharField(max_length=20)
+    media_url   = serializers.URLField(
+        help_text="Publicly accessible URL of the media file"
+    )
+    media_type  = serializers.ChoiceField(
+        choices=["image", "audio", "video", "document"],
+        default="image",
+    )
+    caption     = serializers.CharField(
+        max_length=1024,
+        required=False,
+        default="",
+        allow_blank=True,
+    )
+
+    def validate_to_number(self, value):
+        value = value.strip()
+        if not value.startswith("+"):
+            value = f"+{value}"
+        if len(value) < 8:
+            raise serializers.ValidationError(
+                "Phone number too short. Use E.164 format."
+            )
+        return value
+
+    def validate_media_url(self, value):
+        if not value.startswith("https://"):
+            raise serializers.ValidationError(
+                "media_url must be a publicly accessible HTTPS URL."
+            )
+        return value
 
