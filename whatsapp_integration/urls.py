@@ -4,9 +4,23 @@ from . import views
 app_name = "whatsapp_integration"
 
 urlpatterns = [
+    # ── System ────────────────────────────────────────────────────────────────
     path("health/", views.health_check, name="health-check"),
     path("stats/", views.system_stats, name="system-stats"),
+
+    # ── Webhook ───────────────────────────────────────────────────────────────
     path("webhook/whatsapp/", views.webhook_receiver, name="webhook-receiver"),
+
+    # ── Messaging ─────────────────────────────────────────────────────────────
     path("messages/send/", views.send_message, name="send-message"),
     path("messages/status/", views.message_status_callback, name="message-status-callback"),
+
+    # ── Conversations ─────────────────────────────────────────────────────────
+    path("conversations/", views.conversation_list, name="conversation-list"),
+    path("conversations/<uuid:conversation_id>/", views.conversation_detail, name="conversation-detail"),
+    path("conversations/<uuid:conversation_id>/messages/", views.conversation_messages, name="conversation-messages"),
+
+    # ── Contacts ──────────────────────────────────────────────────────────────
+    path("contacts/", views.contact_list, name="contact-list"),
+    path("contacts/<uuid:contact_id>/", views.contact_detail, name="contact-detail"),
 ]
