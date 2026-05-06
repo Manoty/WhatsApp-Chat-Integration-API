@@ -46,6 +46,33 @@ class MockWhatsAppClient:
                 "sid": fake_sid,
             },
         )
+        
+    def send_media_message(
+        self,
+        to_number: str,
+        from_number: str,
+        media_url: str,
+        caption: str = "",
+        media_type: str = "image",
+    ) -> SendResult:
+        import uuid
+        fake_sid = f"MOCK_MM{uuid.uuid4().hex[:20].upper()}"
+        logger.info(
+            "[MOCK] Sending media | to=%s | type=%s | url=%s | sid=%s",
+            to_number, media_type, media_url[:60], fake_sid,
+        )
+        return SendResult(
+            success=True,
+            provider_message_id=fake_sid,
+            raw_response={
+                "mock": True,
+                "to": to_number,
+                "media_url": media_url,
+                "caption": caption,
+                "media_type": media_type,
+                "sid": fake_sid,
+            },
+        )    
 
 
 class TwilioWhatsAppClient:
@@ -98,6 +125,45 @@ class TwilioWhatsAppClient:
                 success=False,
                 error_message=str(exc),
             )
+            
+    def send_media_message(
+        self,
+        to_number: str,
+        from_number: str,
+        media_url: str,
+        caption: str = "",
+        media_type: str = "image",
+    ) -> SendResult:
+        try:
+            client = self._get_client()
+            message = client.messages.create(
+                body=caption,
+                from_=f"whatsapp:{from_number}",
+                to=f"whatsapp:{to_number}",
+                media_url=[media_url],
+            )
+            logger.info(
+                "[TWILIO] Media sent | sid=%s | to=%s | type=%s",
+                message.sid, to_number, media_type,
+            )
+            return SendResult(
+                success=True,
+                provider_message_id=message.sid,
+                raw_response={
+                    "sid": message.sid,
+                    "status": message.status,
+                    "to": message.to,
+                    "media_url": media_url,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "[TWILIO] Media send failed | to=%s | error=%s", to_number, exc
+            )
+            return SendResult(success=False, error_message=str(exc))        
+            
+            
+
 
 
 def get_whatsapp_client():

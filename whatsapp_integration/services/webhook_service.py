@@ -1,7 +1,7 @@
 import logging
 from django.utils import timezone
 from ..models import BusinessAccount, WhatsAppContact, Conversation, Message
-
+from .media_service import MediaService
 
 logger = logging.getLogger(__name__)
 
@@ -192,23 +192,50 @@ class WebhookService:
     def _store_message(
         self, conversation: Conversation, normalized: dict, raw_payload: dict
     ) -> Message | None:
-
+        """
+        Deduplicate by provider_message_id, store the message,
+        and create MediaAttachment if media is present.
+        """
         provider_id = normalized.get("provider_message_id", "")
 
-        if provider_id and Message.objects.filter(provider_message_id=provider_id).exists():
+        # Deduplication guard
+        if provider_id and Message.objects.filter(
+            provider_message_id=provider_id
+        ).exists():
+            logger.info("Duplicate message ignored: %s", provider_id)
             return None
 
         message = Message.objects.create(
             conversation=conversation,
             direction=Message.Direction.INBOUND,
             message_type=normalized["message_type"],
-            body=normalized["body"],
+            body=normalized.get("body", ""),
             provider_message_id=provider_id,
             status=Message.Status.DELIVERED,
             raw_payload=raw_payload,
         )
 
+        # ── Handle media attachments ──────────────────────────────────────────
+        media_items = normalized.get("media_items", [])
+        if media_items:
+            media_svc = MediaService()
+            for media_dict in media_items:
+                try:
+                    media_svc.create_attachment(message, media_dict)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to create media attachment: %s", exc
+                    )
+
         conversation.update_last_message_time()
+
+        logger.info(
+            "Message stored | id=%s | type=%s | media_count=%d | from=%s",
+            message.id,
+            normalized["message_type"],
+            len(media_items),
+            normalized["from_number"],
+        )
 
         return message
 
