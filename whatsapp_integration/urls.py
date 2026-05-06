@@ -11,9 +11,13 @@ urlpatterns = [
     # ── Webhook ───────────────────────────────────────────────────────────────
     path("webhook/whatsapp/", views.webhook_receiver, name="webhook-receiver"),
 
-    # ── Messaging ─────────────────────────────────────────────────────────────
+    # ── Messaging (sync + async) ──────────────────────────────────────────────
     path("messages/send/", views.send_message, name="send-message"),
+    path("messages/send/async/", views.send_message_async, name="send-message-async"),
     path("messages/status/", views.message_status_callback, name="message-status-callback"),
+
+    # ── Task Tracking ─────────────────────────────────────────────────────────
+    path("tasks/<str:task_id>/", views.task_status, name="task-status"),
 
     # ── Conversations ─────────────────────────────────────────────────────────
     path("conversations/", views.conversation_list, name="conversation-list"),
