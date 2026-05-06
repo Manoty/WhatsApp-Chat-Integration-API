@@ -214,3 +214,85 @@ def cleanup_old_task_results():
     deleted, _ = TaskResult.objects.filter(date_done__lt=cutoff).delete()
     logger.info("Cleaned up %d old task results", deleted)
     return {"deleted": deleted}
+
+
+# ─── Send Media Task ──────────────────────────────────────────────────────────
+
+@shared_task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,
+    name="whatsapp.send_media",
+    queue="messages",
+)
+def send_whatsapp_media_task(
+    self,
+    business_id: str,
+    to_number: str,
+    media_url: str,
+    media_type: str,
+    caption: str = "",
+    message_id: str = None,
+):
+    """
+    Async task: send a media message via the WhatsApp provider.
+    Retries up to 3 times with exponential backoff on failure.
+    """
+    from .models import Message, MediaAttachment, BusinessAccount
+    from .services.whatsapp_client import get_whatsapp_client
+    from .services.media_service import MediaService
+
+    logger.info(
+        "Media task started | type=%s | to=%s | attempt=%d",
+        media_type, to_number, self.request.retries + 1,
+    )
+
+    try:
+        business = BusinessAccount.objects.get(id=business_id, is_active=True)
+        client   = get_whatsapp_client()
+
+        result = client.send_media_message(
+            to_number=to_number,
+            from_number=business.phone_number_id,
+            media_url=media_url,
+            caption=caption,
+            media_type=media_type,
+        )
+
+        if result.success and message_id:
+            message = Message.objects.get(id=message_id)
+            message.status               = Message.Status.SENT
+            message.provider_message_id  = result.provider_message_id
+            message.raw_payload          = result.raw_response
+            message.status_updated_at    = timezone.now()
+            message.save(update_fields=[
+                "status", "provider_message_id",
+                "raw_payload", "status_updated_at", "updated_at",
+            ])
+            message.conversation.update_last_message_time()
+
+            # Update the MediaAttachment with provider's message ID
+            MediaAttachment.objects.filter(message=message).update(
+                provider_media_id=result.provider_message_id
+            )
+
+        if not result.success:
+            raise Exception(result.error_message)
+
+        logger.info(
+            "Media task succeeded | sid=%s | to=%s",
+            result.provider_message_id, to_number,
+        )
+        return {
+            "status": "sent",
+            "provider_message_id": result.provider_message_id,
+            "message_id": message_id,
+        }
+
+    except Exception as exc:
+        retry_delay = 60 * (2 ** self.request.retries)
+        logger.warning(
+            "Media task failed (attempt %d) | error=%s | retrying in %ds",
+            self.request.retries + 1, exc, retry_delay,
+        )
+        raise self.retry(exc=exc, countdown=retry_delay)
