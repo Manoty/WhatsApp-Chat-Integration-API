@@ -283,3 +283,87 @@ class AutoReplyRule(TimeStampedModel):
         AutoReplyRule.objects.filter(id=self.id).update(
             trigger_count=models.F("trigger_count") + 1
         )        
+        
+# ─── Media Layer ──────────────────────────────────────────────────────────────
+
+class MediaAttachment(TimeStampedModel):
+    """
+    Stores metadata about a media file attached to a Message.
+    We store the provider's URL and metadata — we do NOT
+    download/store the raw file (use S3 for that in production).
+
+    One Message can have one MediaAttachment.
+    """
+
+    class MediaCategory(models.TextChoices):
+        IMAGE    = "image",    "Image"
+        AUDIO    = "audio",    "Audio"
+        VIDEO    = "video",    "Video"
+        DOCUMENT = "document", "Document"
+        STICKER  = "sticker",  "Sticker"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    message = models.OneToOneField(
+        Message,
+        on_delete=models.CASCADE,
+        related_name="media_attachment",
+    )
+    category = models.CharField(
+        max_length=20,
+        choices=MediaCategory.choices,
+    )
+    # URL where the file can be fetched from the provider
+    media_url = models.URLField(
+        max_length=2048,
+        blank=True,
+        default="",
+        help_text="Provider-hosted URL for the media file",
+    )
+    # Provider's own media ID (used to fetch the URL for Meta API)
+    provider_media_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        db_index=True,
+    )
+    mime_type = models.CharField(
+        max_length=127,
+        blank=True,
+        default="",
+        help_text="e.g. image/jpeg, audio/ogg, application/pdf",
+    )
+    file_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Original filename for documents",
+    )
+    file_size = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="File size in bytes",
+    )
+    caption = models.TextField(
+        blank=True,
+        default="",
+        help_text="Optional caption sent with the media",
+    )
+    # If we download and re-host the file (e.g. on S3) store URL here
+    stored_url = models.URLField(
+        max_length=2048,
+        blank=True,
+        default="",
+        help_text="Our own stored copy URL (e.g. S3). Empty if not downloaded.",
+    )
+    is_downloaded = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "media_attachments"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"[{self.category}] {self.file_name or self.mime_type} "
+            f"| msg={self.message_id}"
+        )        
