@@ -5,6 +5,9 @@ from .models import AutoReplyRule
 from .models import MediaAttachment
 from .models import MessageTemplate, TemplateSend
 
+from .models import WebhookEndpoint, WebhookDeliveryLog
+
+
 
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(admin.ModelAdmin):
@@ -96,3 +99,31 @@ class TemplateSendAdmin(admin.ModelAdmin):
     )      
     
     
+
+@admin.register(WebhookEndpoint)
+class WebhookEndpointAdmin(admin.ModelAdmin):
+    list_display  = (
+        "name", "business", "url", "is_active",
+        "total_deliveries", "failed_deliveries", "last_triggered_at",
+    )
+    list_filter   = ("is_active", "business")
+    search_fields = ("name", "url")
+    readonly_fields = (
+        "total_deliveries", "failed_deliveries",
+        "last_triggered_at", "created_at", "updated_at",
+    )
+
+
+@admin.register(WebhookDeliveryLog)
+class WebhookDeliveryLogAdmin(admin.ModelAdmin):
+    list_display  = (
+        "event_type", "endpoint", "status",
+        "http_status_code", "attempt_number",
+        "duration_ms", "delivered_at",
+    )
+    list_filter   = ("status", "event_type")
+    search_fields = ("event_type", "error_message")
+    readonly_fields = (
+        "payload", "response_body", "error_message",
+        "delivered_at", "created_at",
+    )    
