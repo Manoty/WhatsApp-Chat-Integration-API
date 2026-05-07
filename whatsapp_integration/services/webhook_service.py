@@ -4,17 +4,15 @@ from django.utils import timezone
 from ..models import BusinessAccount, WhatsAppContact, Conversation, Message
 from .media_service import MediaService
 
+from .webhook_dispatcher import WebhookDispatcher
+from .event_builder import EventBuilder
+
 logger = logging.getLogger(__name__)
 
 
 class WebhookService:
     """
-    Handles full lifecycle of incoming WhatsApp webhook events:
-    - Normalize payload (Twilio / Meta)
-    - Resolve business
-    - Manage contact + conversation
-    - Store message
-    - Queue async auto-reply
+    Handles full lifecycle of incoming WhatsApp webhook events.
     """
 
     # ─────────────────────────────────────────────────────────────
@@ -22,7 +20,6 @@ class WebhookService:
     # ─────────────────────────────────────────────────────────────
     def process_incoming_message(self, payload: dict, source: str = "twilio") -> Message | None:
         try:
-            # ── Normalize payload ───────────────────────────────
             if source == "twilio":
                 normalized = self._normalize_twilio(payload)
             else:
@@ -32,7 +29,6 @@ class WebhookService:
                 logger.warning("Unprocessable webhook payload: %s", payload)
                 return None
 
-            # ── Resolve business ────────────────────────────────
             business = self._resolve_business(normalized["to_number"])
             if not business:
                 logger.warning(
@@ -41,16 +37,13 @@ class WebhookService:
                 )
                 return None
 
-            # ── Contact + conversation ─────────────────────────
             contact = self._get_or_create_contact(business, normalized)
             conversation = self._get_or_create_conversation(business, contact)
 
-            # ── Store message ───────────────────────────────────
             message = self._store_message(conversation, normalized, payload)
             if not message:
                 return None
 
-            # ── Async auto-reply (Celery) ───────────────────────
             try:
                 from ..tasks import process_auto_reply_task
 
@@ -59,7 +52,6 @@ class WebhookService:
                     queue="messages",
                     countdown=1,
                 )
-
                 logger.info("Auto-reply queued | message_id=%s", message.id)
 
             except Exception as exc:
@@ -84,19 +76,20 @@ class WebhookService:
             return None
 
         num_media = int(payload.get("NumMedia", 0))
-
         media_items = []
-        if num_media > 0:
-            media_items.append({
-                "url": payload.get("MediaUrl0"),
-                "content_type": payload.get("MediaContentType0"),
-            })
 
-        message_type = (
-            Message.MessageType.IMAGE
-            if num_media > 0
-            else Message.MessageType.TEXT
-        )
+        # ✅ FIX 1 & 2 — Support multiple media + infer type
+        message_type = Message.MessageType.TEXT
+
+        for i in range(num_media):
+            url = payload.get(f"MediaUrl{i}")
+            content_type = payload.get(f"MediaContentType{i}", "")
+            if url:
+                media_items.append({
+                    "url": url,
+                    "content_type": content_type,
+                })
+                message_type = self._media_type_to_enum(content_type)
 
         return {
             "from_number": from_number,
@@ -122,28 +115,18 @@ class WebhookService:
             body = ""
             media_items = []
 
+            # ✅ FIX 3 — Normalize Meta media format
             if message_type_raw == "text":
                 body = message_data.get("text", {}).get("body", "")
                 message_type = Message.MessageType.TEXT
 
-            elif message_type_raw == "image":
-                message_type = Message.MessageType.IMAGE
-                media_items.append(message_data.get("image", {}))
-
-            elif message_type_raw == "audio":
-                message_type = Message.MessageType.AUDIO
-                media_items.append(message_data.get("audio", {}))
-
-            elif message_type_raw == "video":
-                message_type = Message.MessageType.VIDEO
-                media_items.append(message_data.get("video", {}))
-
-            elif message_type_raw == "document":
-                message_type = Message.MessageType.DOCUMENT
-                media_items.append(message_data.get("document", {}))
-
             else:
-                message_type = Message.MessageType.TEXT
+                media_blob = message_data.get(message_type_raw, {})
+                media_items.append({
+                    "url": media_blob.get("id"),  # MediaService will resolve this
+                    "content_type": media_blob.get("mime_type", ""),
+                })
+                message_type = self._media_type_to_enum(media_blob.get("mime_type", ""))
 
             return {
                 "from_number": from_number,
@@ -221,26 +204,24 @@ class WebhookService:
 
         provider_id = normalized.get("provider_message_id", "")
 
-        # Deduplication
-        if provider_id and Message.objects.filter(
-            provider_message_id=provider_id
-        ).exists():
+        # ✅ FIX 4 — Race-safe deduplication
+        message, created = Message.objects.get_or_create(
+            provider_message_id=provider_id,
+            defaults={
+                "conversation": conversation,
+                "direction": Message.Direction.INBOUND,
+                "message_type": normalized["message_type"],
+                "body": normalized.get("body", ""),
+                "status": Message.Status.DELIVERED,
+                "raw_payload": raw_payload,
+            },
+        )
+
+        if not created:
             logger.info("Duplicate message ignored: %s", provider_id)
             return None
 
-        message = Message.objects.create(
-            conversation=conversation,
-            direction=Message.Direction.INBOUND,
-            message_type=normalized["message_type"],
-            body=normalized.get("body", ""),
-            provider_message_id=provider_id,
-            status=Message.Status.DELIVERED,
-            raw_payload=raw_payload,
-        )
-
-        # ── Media attachments ───────────────────────────────
         media_items = normalized.get("media_items", [])
-
         if media_items:
             media_svc = MediaService()
             for media in media_items:
@@ -250,6 +231,20 @@ class WebhookService:
                     logger.warning("Media attachment failed: %s", exc)
 
         conversation.update_last_message_time()
+
+        try:
+            builder = EventBuilder()
+            dispatcher = WebhookDispatcher()
+            payload = builder.message_received(message)
+            dispatcher.dispatch(
+                business_id=str(conversation.business_id),
+                event_type="message.received",
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Outbound webhook dispatch failed (non-fatal): %s", exc
+            )
 
         logger.info(
             "Message stored | id=%s | type=%s | media=%d | from=%s",

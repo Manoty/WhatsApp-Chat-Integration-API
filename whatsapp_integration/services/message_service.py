@@ -3,6 +3,9 @@ from django.utils import timezone
 from ..models import BusinessAccount, WhatsAppContact, Conversation, Message
 from .whatsapp_client import get_whatsapp_client
 
+from .webhook_dispatcher import WebhookDispatcher
+from .event_builder import EventBuilder
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +70,20 @@ class MessageService:
 
         conversation.update_last_message_time()
 
+        try:
+            builder = EventBuilder()
+            dispatcher = WebhookDispatcher()
+            payload = builder.message_sent(message)
+            dispatcher.dispatch(
+                business_id=str(conversation.business.id),
+                event_type="message.sent",
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Outbound webhook dispatch failed (non-fatal): %s", exc
+            )
+
         return message
 
     # ── ASYNC SEND (CELERY) ───────────────────────────────────────────────────
@@ -119,6 +136,14 @@ class MessageService:
 
     # ── CALLED BY CELERY WORKER ──────────────────────────────────────────────
     def _call_provider_and_update(self, message) -> bool:
+        # ✅ FIX 1 — Idempotency guard (prevents duplicate sends on retry)
+        if message.status != Message.Status.PENDING:
+            logger.warning(
+                "Skipping provider call, message already processed | id=%s | status=%s",
+                message.id, message.status
+            )
+            return True
+
         client = get_whatsapp_client()
 
         result = client.send_text_message(
@@ -148,6 +173,21 @@ class MessageService:
 
         message.conversation.update_last_message_time()
 
+        # ✅ FIX 2 — Webhook for async path
+        try:
+            builder = EventBuilder()
+            dispatcher = WebhookDispatcher()
+            payload = builder.message_sent(message)
+            dispatcher.dispatch(
+                business_id=str(message.conversation.business.id),
+                event_type="message.sent",
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Outbound webhook dispatch failed (async, non-fatal): %s", exc
+            )
+
         return True
 
     # ── STATUS CALLBACK ──────────────────────────────────────────────────────
@@ -157,7 +197,33 @@ class MessageService:
             message.status = new_status
             message.status_updated_at = timezone.now()
             message.save(update_fields=["status", "status_updated_at", "updated_at"])
+
+            # ✅ FIX 3 — Keep conversation ordering correct
+            message.conversation.update_last_message_time()
+
+            try:
+                STATUS_EVENT_MAP = {
+                    "delivered": "message.delivered",
+                    "read": "message.read",
+                    "failed": "message.failed",
+                }
+                event_type = STATUS_EVENT_MAP.get(new_status)
+                if event_type:
+                    builder = EventBuilder()
+                    dispatcher = WebhookDispatcher()
+                    payload = builder.message_status_changed(message, event_type)
+                    dispatcher.dispatch(
+                        business_id=str(message.conversation.business_id),
+                        event_type=event_type,
+                        payload=payload,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Status webhook dispatch failed (non-fatal): %s", exc
+                )
+
             return message
+
         except Message.DoesNotExist:
             logger.warning("Unknown provider_message_id: %s", provider_message_id)
             return None

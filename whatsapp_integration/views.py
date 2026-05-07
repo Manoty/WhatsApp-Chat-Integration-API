@@ -278,6 +278,23 @@ def conversation_detail(request, conversation_id):
         for field, value in updates.items():
             setattr(conversation, field, value)
         conversation.save(update_fields=list(updates.keys()) + ["updated_at"])
+        # Dispatch webhook event if conversation was closed
+        if updates.get("status") == "closed":
+            try:
+                from .services.webhook_dispatcher import WebhookDispatcher
+                from .services.event_builder import EventBuilder
+                builder    = EventBuilder()
+                dispatcher = WebhookDispatcher()
+                payload    = builder.conversation_closed(conversation)
+                dispatcher.dispatch(
+                    business_id=str(conversation.business_id),
+                    event_type="conversation.closed",
+                    payload=payload,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Webhook dispatch failed (non-fatal): %s", exc
+                )
     return Response(ConversationSerializer(conversation).data)
 
 
