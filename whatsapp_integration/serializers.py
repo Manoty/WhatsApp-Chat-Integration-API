@@ -9,6 +9,8 @@ from .models import (
     MediaAttachment,
     MessageTemplate,
     TemplateSend,
+    WebhookEndpoint,     
+    WebhookDeliveryLog,
 )
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
@@ -297,3 +299,58 @@ class BulkSendTemplateRequestSerializer(serializers.Serializer):
                 "Maximum 1,000 recipients per bulk send request."
             )
         return value
+    
+class WebhookEndpointSerializer(serializers.ModelSerializer):
+    total_deliveries  = serializers.IntegerField(read_only=True)
+    failed_deliveries = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model  = WebhookEndpoint
+        fields = [
+            "id", "business", "name", "url",
+            "secret", "subscribed_events", "is_active",
+            "total_deliveries", "failed_deliveries",
+            "last_triggered_at", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "total_deliveries", "failed_deliveries",
+            "last_triggered_at", "created_at", "updated_at",
+        ]
+        extra_kwargs = {
+            # Never expose secret in list responses
+            "secret": {"write_only": True},
+        }
+
+    def validate_url(self, value):
+        if not value.startswith("https://"):
+            raise serializers.ValidationError(
+                "Webhook URL must use HTTPS."
+            )
+        return value
+
+    def validate_subscribed_events(self, value):
+        valid_events = [e.value for e in WebhookEndpoint.EventType] + ["*"]
+        for event in value:
+            if event not in valid_events:
+                raise serializers.ValidationError(
+                    f"Invalid event type: '{event}'. "
+                    f"Valid options: {valid_events}"
+                )
+        if not value:
+            raise serializers.ValidationError(
+                "subscribed_events must contain at least one event type. "
+                "Use [\"*\"] to subscribe to all events."
+            )
+        return value
+
+
+class WebhookDeliveryLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = WebhookDeliveryLog
+        fields = [
+            "id", "endpoint", "event_type", "status",
+            "http_status_code", "response_body", "error_message",
+            "attempt_number", "duration_ms", "delivered_at",
+            "created_at",
+        ]
+        read_only_fields = fields    
