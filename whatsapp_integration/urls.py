@@ -8,15 +8,15 @@ urlpatterns = [
     path("health/",  views.health_check,  name="health-check"),
     path("stats/",   views.system_stats,  name="system-stats"),
 
-    # ── Webhook ───────────────────────────────────────────────────────────────
+    # ── Webhook Inbound ───────────────────────────────────────────────────────
     path("webhook/whatsapp/", views.webhook_receiver, name="webhook-receiver"),
 
     # ── Messaging ─────────────────────────────────────────────────────────────
-    path("messages/send/",                    views.send_message,           name="send-message"),
-    path("messages/send/async/",              views.send_message_async,     name="send-message-async"),
-    path("messages/send/media/",              views.send_media_message,     name="send-media-message"),
-    path("messages/status/",                  views.message_status_callback,name="message-status-callback"),
-    path("messages/<uuid:message_id>/media/", views.message_media,          name="message-media"),
+    path("messages/send/",                    views.send_message,            name="send-message"),
+    path("messages/send/async/",              views.send_message_async,      name="send-message-async"),
+    path("messages/send/media/",              views.send_media_message,      name="send-media-message"),
+    path("messages/status/",                  views.message_status_callback, name="message-status-callback"),
+    path("messages/<uuid:message_id>/media/", views.message_media,           name="message-media"),
 
     # ── Task Tracking ─────────────────────────────────────────────────────────
     path("tasks/<str:task_id>/", views.task_status, name="task-status"),
@@ -44,4 +44,11 @@ urlpatterns = [
     path("templates/<uuid:template_id>/",         views.template_detail,       name="template-detail"),
     path("templates/<uuid:template_id>/submit/",  views.template_submit,       name="template-submit"),
     path("templates/<uuid:template_id>/history/", views.template_send_history, name="template-send-history"),
+
+    # ── Webhooks Out ──────────────────────────────────────────────────────────
+    path("webhooks/events/",                                   views.webhook_event_types,      name="webhook-event-types"),
+    path("webhooks/endpoints/",                                views.webhook_endpoint_list,     name="webhook-endpoint-list"),
+    path("webhooks/endpoints/<uuid:endpoint_id>/",             views.webhook_endpoint_detail,   name="webhook-endpoint-detail"),
+    path("webhooks/endpoints/<uuid:endpoint_id>/test/",        views.webhook_endpoint_test,     name="webhook-endpoint-test"),
+    path("webhooks/endpoints/<uuid:endpoint_id>/logs/",        views.webhook_delivery_logs,     name="webhook-delivery-logs"),
 ]
