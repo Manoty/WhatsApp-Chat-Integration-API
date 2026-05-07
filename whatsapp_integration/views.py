@@ -6,6 +6,9 @@ from rest_framework import status
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
+from .models import WebhookEndpoint, WebhookDeliveryLog
+from .serializers import WebhookEndpointSerializer, WebhookDeliveryLogSerializer
+
 from .models import (
     BusinessAccount, WhatsAppContact,
     Conversation, Message, AutoReplyRule,
@@ -1072,3 +1075,234 @@ def template_preview(request):
         "rendered_body":   rendered,
         "ready_to_send":   template.status == MessageTemplate.Status.APPROVED,
     })    
+    
+# ─── Webhook Endpoints ────────────────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def webhook_endpoint_list(request):
+    """
+    List all registered webhook endpoints or create a new one.
+
+    GET  /api/webhooks/endpoints/
+    POST /api/webhooks/endpoints/
+    {
+        "business": "<uuid>",
+        "name": "CRM Integration",
+        "url": "https://mycrm.com/whatsapp/events",
+        "secret": "my-secret-key-for-signing",
+        "subscribed_events": ["message.received", "conversation.opened"]
+    }
+
+    Use ["*"] in subscribed_events to receive ALL event types.
+    """
+    if request.method == "GET":
+        qs = WebhookEndpoint.objects.select_related("business").all()
+
+        business_id = request.GET.get("business_id")
+        if business_id:
+            qs = qs.filter(business__id=business_id)
+
+        active = request.GET.get("active")
+        if active == "true":
+            qs = qs.filter(is_active=True)
+
+        return Response(WebhookEndpointSerializer(qs, many=True).data)
+
+    serializer = WebhookEndpointSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    endpoint = serializer.save()
+    logger.info(
+        "WebhookEndpoint created | id=%s | url=%s | business=%s",
+        endpoint.id, endpoint.url, endpoint.business.name,
+    )
+    return Response(
+        WebhookEndpointSerializer(endpoint).data,
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def webhook_endpoint_detail(request, endpoint_id):
+    """
+    Retrieve, update or delete a single webhook endpoint.
+
+    GET    /api/webhooks/endpoints/<id>/
+    PATCH  /api/webhooks/endpoints/<id>/
+    DELETE /api/webhooks/endpoints/<id>/
+    """
+    try:
+        endpoint = WebhookEndpoint.objects.select_related("business").get(
+            id=endpoint_id
+        )
+    except WebhookEndpoint.DoesNotExist:
+        return Response(
+            {"error": "WebhookEndpoint not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if request.method == "GET":
+        return Response(WebhookEndpointSerializer(endpoint).data)
+
+    if request.method == "DELETE":
+        name = endpoint.name
+        endpoint.delete()
+        logger.info("WebhookEndpoint deleted | name=%s", name)
+        return Response({"status": "deleted", "name": name})
+
+    serializer = WebhookEndpointSerializer(
+        endpoint, data=request.data, partial=True
+    )
+    if serializer.is_valid():
+        return Response(
+            WebhookEndpointSerializer(serializer.save()).data
+        )
+    return Response(
+        {"status": "error", "errors": serializer.errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def webhook_endpoint_test(request, endpoint_id):
+    """
+    Send a test ping event to a webhook endpoint.
+    Use this to verify your endpoint URL is reachable and
+    your signature verification is working correctly.
+
+    POST /api/webhooks/endpoints/<id>/test/
+    """
+    try:
+        endpoint = WebhookEndpoint.objects.get(id=endpoint_id)
+    except WebhookEndpoint.DoesNotExist:
+        return Response(
+            {"error": "WebhookEndpoint not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    from .services.event_builder import EventBuilder
+    from .tasks import deliver_webhook_task
+
+    test_payload = EventBuilder().build(
+        event_type="ping",
+        business_id=str(endpoint.business_id),
+        data={
+            "message": "This is a test event from WhatsApp Chat API",
+            "endpoint_id": str(endpoint.id),
+            "endpoint_name": endpoint.name,
+        },
+    )
+
+    task = deliver_webhook_task.apply_async(
+        kwargs={
+            "endpoint_id": str(endpoint.id),
+            "event_type":  "ping",
+            "payload":     test_payload,
+            "attempt":     1,
+        },
+        queue="webhooks",
+    )
+
+    return Response({
+        "status":   "test_queued",
+        "task_id":  task.id,
+        "endpoint": endpoint.url,
+        "note":     "Check delivery logs to see the result.",
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def webhook_delivery_logs(request, endpoint_id):
+    """
+    Get delivery logs for a webhook endpoint.
+
+    GET /api/webhooks/endpoints/<id>/logs/
+    Query params:
+      ?status=success|failed|retrying
+      ?event_type=message.received
+      ?page=1
+    """
+    try:
+        endpoint = WebhookEndpoint.objects.get(id=endpoint_id)
+    except WebhookEndpoint.DoesNotExist:
+        return Response(
+            {"error": "WebhookEndpoint not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    logs = WebhookDeliveryLog.objects.filter(
+        endpoint=endpoint
+    ).order_by("-created_at")
+
+    status_filter = request.GET.get("status")
+    if status_filter:
+        logs = logs.filter(status=status_filter)
+
+    event_type = request.GET.get("event_type")
+    if event_type:
+        logs = logs.filter(event_type=event_type)
+
+    page, page_size = _get_pagination(request, default_size=20)
+    total  = logs.count()
+    start  = (page - 1) * page_size
+    subset = logs[start:start + page_size]
+
+    return Response({
+        "endpoint": {
+            "id":               str(endpoint.id),
+            "name":             endpoint.name,
+            "url":              endpoint.url,
+            "total_deliveries": endpoint.total_deliveries,
+            "failed_deliveries":endpoint.failed_deliveries,
+        },
+        "count":       total,
+        "page":        page,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "results":     WebhookDeliveryLogSerializer(subset, many=True).data,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def webhook_event_types(request):
+    """
+    List all available event types for subscription.
+
+    GET /api/webhooks/events/
+    """
+    return Response({
+        "event_types": [
+            {
+                "type":        e.value,
+                "label":       e.label,
+                "description": _event_description(e.value),
+            }
+            for e in WebhookEndpoint.EventType
+        ],
+        "wildcard": {
+            "type":  "*",
+            "label": "All Events",
+            "description": "Subscribe to every event type",
+        },
+    })
+
+
+def _event_description(event_type: str) -> str:
+    return {
+        "message.received":    "Fired when a contact sends an inbound message",
+        "message.sent":        "Fired when an outbound message is sent",
+        "message.delivered":   "Fired when a message is delivered to device",
+        "message.read":        "Fired when a contact reads a message",
+        "message.failed":      "Fired when a message fails to deliver",
+        "conversation.opened": "Fired when a new conversation starts",
+        "conversation.closed": "Fired when a conversation is closed",
+        "contact.created":     "Fired when a new contact is auto-created",
+    }.get(event_type, "")    
