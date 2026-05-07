@@ -2,6 +2,10 @@ import logging
 from celery import shared_task
 from celery.utils.log import get_task_logger
 from django.utils import timezone
+import time
+import hashlib
+import hmac
+import json
 
 logger = get_task_logger(__name__)
 
@@ -353,3 +357,157 @@ def send_template_task(
     except Exception as exc:
         logger.exception("Unexpected template task error: %s", exc)
         raise self.retry(exc=exc, countdown=60)    
+    
+# ─── Webhook Delivery Task ────────────────────────────────────────────────────
+
+@shared_task(
+    bind=True,
+    max_retries=3,
+    name="whatsapp.deliver_webhook",
+    queue="webhooks",
+)
+def deliver_webhook_task(
+    self,
+    endpoint_id: str,
+    event_type: str,
+    payload: dict,
+    attempt: int = 1,
+):
+    """
+    Deliver a single webhook event to one external endpoint.
+
+    Retry schedule on failure:
+      Attempt 1: immediate
+      Attempt 2: 60 seconds
+      Attempt 3: 300 seconds  (5 min)
+      Attempt 4: 900 seconds  (15 min) → final, marks as FAILED
+    """
+    import requests
+    from .models import WebhookEndpoint, WebhookDeliveryLog
+    from django.utils import timezone
+
+    RETRY_DELAYS = [60, 300, 900]
+
+    try:
+        endpoint = WebhookEndpoint.objects.get(id=endpoint_id)
+    except WebhookEndpoint.DoesNotExist:
+        logger.error("WebhookEndpoint not found: %s", endpoint_id)
+        return {"status": "error", "reason": "endpoint_not_found"}
+
+    # Create delivery log record
+    log = WebhookDeliveryLog.objects.create(
+        endpoint=endpoint,
+        event_type=event_type,
+        payload=payload,
+        status=WebhookDeliveryLog.Status.PENDING,
+        attempt_number=attempt,
+    )
+
+    # Build signature
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = _sign_payload(payload_bytes, endpoint.secret)
+
+    headers = {
+        "Content-Type":        "application/json",
+        "X-Webhook-Signature": f"sha256={signature}",
+        "X-Webhook-Event":     event_type,
+        "X-Webhook-ID":        str(log.id),
+        "X-Webhook-Attempt":   str(attempt),
+        "User-Agent":          "WhatsAppAPI-Webhook/1.0",
+    }
+
+    start = time.monotonic()
+    try:
+        response = requests.post(
+            endpoint.url,
+            data=payload_bytes,
+            headers=headers,
+            timeout=10,     # 10 second timeout
+        )
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        # 2xx = success
+        if response.ok:
+            log.status           = WebhookDeliveryLog.Status.SUCCESS
+            log.http_status_code = response.status_code
+            log.response_body    = response.text[:500]
+            log.duration_ms      = duration_ms
+            log.delivered_at     = timezone.now()
+            log.save(update_fields=[
+                "status", "http_status_code", "response_body",
+                "duration_ms", "delivered_at", "updated_at",
+            ])
+            endpoint.increment_delivery(success=True)
+
+            logger.info(
+                "Webhook delivered | event=%s | url=%s | status=%d | %dms",
+                event_type, endpoint.url[:60],
+                response.status_code, duration_ms,
+            )
+            return {
+                "status":      "delivered",
+                "http_status": response.status_code,
+                "duration_ms": duration_ms,
+            }
+
+        # Non-2xx — treat as failure and retry
+        error_msg = (
+            f"HTTP {response.status_code}: {response.text[:200]}"
+        )
+        raise Exception(error_msg)
+
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        error_str   = str(exc)
+        retry_num   = self.request.retries
+
+        logger.warning(
+            "Webhook delivery failed | event=%s | url=%s | attempt=%d | error=%s",
+            event_type, endpoint.url[:60], attempt, error_str,
+        )
+
+        if retry_num < self.max_retries:
+            # Update log as retrying
+            log.status        = WebhookDeliveryLog.Status.RETRYING
+            log.error_message = error_str
+            log.duration_ms   = duration_ms
+            log.save(update_fields=[
+                "status", "error_message", "duration_ms", "updated_at",
+            ])
+            retry_delay = RETRY_DELAYS[min(retry_num, len(RETRY_DELAYS) - 1)]
+            raise self.retry(
+                exc=exc,
+                countdown=retry_delay,
+                kwargs={
+                    "endpoint_id": endpoint_id,
+                    "event_type":  event_type,
+                    "payload":     payload,
+                    "attempt":     attempt + 1,
+                },
+            )
+
+        # Final failure
+        log.status           = WebhookDeliveryLog.Status.FAILED
+        log.error_message    = error_str
+        log.duration_ms      = duration_ms
+        log.http_status_code = getattr(exc, "status_code", None)
+        log.save(update_fields=[
+            "status", "error_message", "duration_ms",
+            "http_status_code", "updated_at",
+        ])
+        endpoint.increment_delivery(success=False)
+
+        logger.error(
+            "Webhook delivery permanently failed | event=%s | url=%s | error=%s",
+            event_type, endpoint.url[:60], error_str,
+        )
+        return {"status": "failed", "error": error_str}
+
+
+def _sign_payload(payload_bytes: bytes, secret: str) -> str:
+    """HMAC-SHA256 signature of the raw payload bytes."""
+    return hmac.new(
+        secret.encode("utf-8"),
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()    
