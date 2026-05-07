@@ -557,4 +557,132 @@ class TemplateSend(TimeStampedModel):
             f"{self.template.name} → {self.contact.phone_number} "
             f"[{self.status}]"
         )        
+        
+        
+# ─── Webhooks Out Layer ───────────────────────────────────────────────────────
+
+class WebhookEndpoint(TimeStampedModel):
+    """
+    An external URL registered by a BusinessAccount to receive event
+    notifications. One business can have multiple endpoints
+    (e.g. CRM + analytics + custom app).
+
+    Events are POSTed to the URL as JSON with an HMAC-SHA256 signature
+    in the X-Webhook-Signature header for verification.
+    """
+
+    class EventType(models.TextChoices):
+        # Message events
+        MESSAGE_RECEIVED  = "message.received",  "Message Received"
+        MESSAGE_SENT      = "message.sent",      "Message Sent"
+        MESSAGE_DELIVERED = "message.delivered", "Message Delivered"
+        MESSAGE_READ      = "message.read",      "Message Read"
+        MESSAGE_FAILED    = "message.failed",    "Message Failed"
+        # Conversation events
+        CONVERSATION_OPENED = "conversation.opened", "Conversation Opened"
+        CONVERSATION_CLOSED = "conversation.closed", "Conversation Closed"
+        # Contact events
+        CONTACT_CREATED = "contact.created", "Contact Created"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(
+        BusinessAccount,
+        on_delete=models.CASCADE,
+        related_name="webhook_endpoints",
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text="Human label e.g. 'CRM Integration' or 'Analytics Pipeline'",
+    )
+    url = models.URLField(
+        max_length=2048,
+        help_text="HTTPS endpoint that will receive event POST requests",
+    )
+    # Secret used to sign outbound payloads (HMAC-SHA256)
+    secret = models.CharField(
+        max_length=255,
+        help_text="Secret key used to sign webhook payloads",
+    )
+    # Which events this endpoint subscribes to
+    # Stored as JSON list e.g. ["message.received", "conversation.opened"]
+    subscribed_events = models.JSONField(
+        default=list,
+        help_text="List of event types this endpoint will receive",
+    )
+    is_active = models.BooleanField(default=True)
+    # Stats
+    total_deliveries  = models.PositiveIntegerField(default=0, editable=False)
+    failed_deliveries = models.PositiveIntegerField(default=0, editable=False)
+    last_triggered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "webhook_endpoints"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} → {self.url[:60]} [{self.business.name}]"
+
+    def subscribes_to(self, event_type: str) -> bool:
+        """Check if this endpoint wants this event."""
+        return (
+            event_type in self.subscribed_events
+            or "*" in self.subscribed_events   # wildcard — all events
+        )
+
+    def increment_delivery(self, success: bool):
+        WebhookEndpoint.objects.filter(id=self.id).update(
+            total_deliveries=models.F("total_deliveries") + 1,
+            last_triggered_at=timezone.now(),
+        )
+        if not success:
+            WebhookEndpoint.objects.filter(id=self.id).update(
+                failed_deliveries=models.F("failed_deliveries") + 1,
+            )
+
+
+class WebhookDeliveryLog(TimeStampedModel):
+    """
+    Immutable log of every webhook delivery attempt.
+    One record per attempt — retries create new records.
+    Invaluable for debugging and auditing.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Success"
+        FAILED  = "failed",  "Failed"
+        RETRYING = "retrying", "Retrying"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    endpoint = models.ForeignKey(
+        WebhookEndpoint,
+        on_delete=models.CASCADE,
+        related_name="delivery_logs",
+    )
+    event_type   = models.CharField(max_length=50)
+    payload      = models.JSONField(help_text="Full event payload sent")
+    status       = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    http_status_code = models.PositiveIntegerField(null=True, blank=True)
+    response_body    = models.TextField(blank=True, default="")
+    error_message    = models.TextField(blank=True, default="")
+    attempt_number   = models.PositiveIntegerField(default=1)
+    duration_ms      = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Response time in milliseconds",
+    )
+    delivered_at     = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "webhook_delivery_logs"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.event_type} → {self.endpoint.url[:40]} "
+            f"[{self.status}] attempt={self.attempt_number}"
+        )        
               
