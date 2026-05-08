@@ -59,6 +59,9 @@ from .services.api_key_service import APIKeyService
 
 from .services.analytics_service import AnalyticsService
 
+from .services.language_service import LanguageService
+from .serializers import LanguageDetectSerializer
+
 logger = logging.getLogger(__name__)
 
 
@@ -2354,3 +2357,196 @@ def websocket_info(request):
             "4003": "Access denied to this resource",
         },
     })        
+    
+# ─── Language ─────────────────────────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def language_detect(request):
+    """
+    Detect the language of any text string.
+    Useful for testing before configuring rules.
+
+    POST /api/language/detect/
+    { "text": "Habari, bei yako ni ngapi?" }
+    """
+    serializer = LanguageDetectSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    svc    = LanguageService()
+    result = svc.detect_text(serializer.validated_data["text"])
+    return Response(result)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def language_supported(request):
+    """
+    List all supported languages for auto-reply rules.
+
+    GET /api/language/supported/
+    """
+    svc = LanguageService()
+    return Response({
+        "languages":    svc.supported_languages(),
+        "total":        len(svc.supported_languages()),
+        "neutral_code": "",
+        "neutral_label":"Any Language (language-neutral rule)",
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def language_breakdown(request):
+    """
+    Language breakdown of inbound messages for a business.
+    Chart-ready data showing which languages your contacts use.
+
+    GET /api/language/breakdown/?business_id=<uuid>
+    """
+    business_id = request.GET.get("business_id", "")
+    if not business_id:
+        return Response(
+            {"error": "business_id is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    svc  = LanguageService()
+    data = svc.message_language_breakdown(business_id)
+
+    return Response({
+        "business_id": business_id,
+        "breakdown":   data,
+        "total":       sum(r["count"] for r in data),
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def language_coverage(request):
+    """
+    Analyse language coverage of your auto-reply rules.
+    Shows which languages have rules and which have gaps.
+
+    GET /api/language/coverage/?business_id=<uuid>
+    """
+    business_id = request.GET.get("business_id", "")
+    if not business_id:
+        return Response(
+            {"error": "business_id is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    svc  = LanguageService()
+    data = svc.rule_language_coverage(business_id)
+
+    return Response({"business_id": business_id, **data})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def auto_reply_test_with_language(request):
+    """
+    Extended dry-run that shows language detection + rule matching.
+
+    POST /api/auto-replies/test/
+    {
+        "business_id": "<uuid>",
+        "message": "Habari, bei yako ni ngapi?"
+    }
+    """
+    business_id  = request.data.get("business_id")
+    message_body = request.data.get("message", "").strip()
+
+    if not business_id or not message_body:
+        return Response(
+            {"error": "business_id and message are required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        business = BusinessAccount.objects.get(
+            id=business_id, is_active=True
+        )
+    except BusinessAccount.DoesNotExist:
+        return Response(
+            {"error": "BusinessAccount not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Detect language first
+    lang_svc       = LanguageService()
+    lang_detection = lang_svc.detect_text(message_body)
+    detected_lang  = lang_detection["language"]
+
+    # Run rule matcher
+    from .services.auto_reply_engine import AutoReplyEngine
+    engine = AutoReplyEngine()
+
+    rules = AutoReplyRule.objects.filter(
+        business=business,
+        is_active=True,
+        is_fallback=False,
+    ).order_by("priority", "created_at")
+
+    matched_rule = None
+    match_pass   = None
+
+    # Pass 1: language-specific
+    for rule in rules.filter(language=detected_lang):
+        if engine._matches(rule, message_body):
+            matched_rule = rule
+            match_pass   = f"language-specific ({detected_lang})"
+            break
+
+    # Pass 2: language-neutral
+    if not matched_rule:
+        for rule in rules.filter(language=""):
+            if engine._matches(rule, message_body):
+                matched_rule = rule
+                match_pass   = "language-neutral"
+                break
+
+    # Pass 3: lang-specific fallback
+    if not matched_rule:
+        matched_rule = AutoReplyRule.objects.filter(
+            business=business,
+            is_active=True,
+            is_fallback=True,
+            language=detected_lang,
+        ).order_by("priority").first()
+        if matched_rule:
+            match_pass = f"fallback (language-specific: {detected_lang})"
+
+    # Pass 4: neutral fallback
+    if not matched_rule:
+        matched_rule = AutoReplyRule.objects.filter(
+            business=business,
+            is_active=True,
+            is_fallback=True,
+            language="",
+        ).order_by("priority").first()
+        if matched_rule:
+            match_pass = "fallback (language-neutral)"
+
+    from .serializers import AutoReplyRuleSerializer
+
+    return Response({
+        "input": {
+            "message":      message_body,
+            "detected_language":   lang_detection["language"],
+            "language_name":       lang_detection["language_name"],
+            "confidence":          lang_detection["confidence"],
+            "detection_reliable":  lang_detection["is_reliable"],
+        },
+        "matched":          matched_rule is not None,
+        "match_pass":       match_pass,
+        "rule":             AutoReplyRuleSerializer(matched_rule).data
+                            if matched_rule else None,
+        "would_reply_with": matched_rule.reply_text if matched_rule else None,
+        "is_fallback":      matched_rule.is_fallback if matched_rule else None,
+    })    
