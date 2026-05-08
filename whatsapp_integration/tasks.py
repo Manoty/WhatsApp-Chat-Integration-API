@@ -511,3 +511,21 @@ def _sign_payload(payload_bytes: bytes, secret: str) -> str:
         payload_bytes,
         hashlib.sha256,
     ).hexdigest()    
+    
+    
+# ─── API Key Cleanup Task ─────────────────────────────────────────────────────
+
+@shared_task(
+    name="whatsapp.cleanup_expired_keys",
+    queue="scheduled",
+)
+def cleanup_expired_api_keys():
+    """
+    Scheduled task: auto-expire API keys past their expiry_at date.
+    Run every hour via Celery Beat.
+    """
+    from .services.api_key_service import APIKeyService
+    svc     = APIKeyService()
+    expired = svc.cleanup_expired()
+    logger.info("API key cleanup | expired=%d", expired)
+    return {"expired_keys": expired}    
