@@ -27,6 +27,19 @@ from .serializers import (
     SendTemplateRequestSerializer,
     BulkSendTemplateRequestSerializer,
 )
+
+from .models import Label, Agent, ConversationLabel, AssignmentLog
+from .serializers import (
+    LabelSerializer,
+    ConversationLabelSerializer,
+    ApplyLabelsSerializer,
+    AgentSerializer,
+    AssignmentLogSerializer,
+    ManualAssignSerializer,
+)
+from .services.label_service import LabelService
+from .services.assignment_engine import AssignmentEngine
+
 from .services.template_service import TemplateService, TemplateError
 
 from .models import MediaAttachment
@@ -1580,4 +1593,407 @@ def api_key_verify(request):
         "request_count":  api_key.request_count,
         "last_used_at":   api_key.last_used_at,
         "expiry_at":      api_key.expiry_at,
+    })    
+    
+# ─── Labels: CRUD ─────────────────────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def label_list(request):
+    """
+    List all labels or create a new one.
+
+    GET  /api/labels/
+    POST /api/labels/
+    {
+        "business": "<uuid>",
+        "name": "urgent",
+        "colour": "red",
+        "description": "Needs immediate attention"
+    }
+    """
+    if request.method == "GET":
+        qs = Label.objects.select_related("business").all()
+
+        business_id = request.GET.get("business_id")
+        if business_id:
+            qs = qs.filter(business__id=business_id)
+
+        if request.GET.get("active") == "true":
+            qs = qs.filter(is_active=True)
+
+        return Response(LabelSerializer(qs, many=True).data)
+
+    serializer = LabelSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    label = serializer.save()
+    logger.info(
+        "Label created | name=%s | business=%s", label.name, label.business.name
+    )
+    return Response(
+        LabelSerializer(label).data, status=status.HTTP_201_CREATED
+    )
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def label_detail(request, label_id):
+    """GET / PATCH / DELETE  /api/labels/<id>/"""
+    try:
+        label = Label.objects.select_related("business").get(id=label_id)
+    except Label.DoesNotExist:
+        return Response(
+            {"error": "Label not found"}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if request.method == "GET":
+        return Response(LabelSerializer(label).data)
+
+    if request.method == "DELETE":
+        name = label.name
+        label.delete()
+        return Response({"status": "deleted", "name": name})
+
+    serializer = LabelSerializer(label, data=request.data, partial=True)
+    if serializer.is_valid():
+        return Response(LabelSerializer(serializer.save()).data)
+    return Response(
+        {"status": "error", "errors": serializer.errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+# ─── Conversation Labels ──────────────────────────────────────────────────────
+
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def conversation_label_manage(request, conversation_id):
+    """
+    Manage labels on a conversation.
+
+    GET    /api/conversations/<id>/labels/         — list current labels
+    POST   /api/conversations/<id>/labels/         — add labels
+           { "labels": ["urgent", "billing"] }
+    PUT    /api/conversations/<id>/labels/         — replace all labels
+           { "labels": ["vip"] }
+    DELETE /api/conversations/<id>/labels/         — remove specific labels
+           { "labels": ["urgent"] }
+    """
+    try:
+        conversation = Conversation.objects.select_related(
+            "business"
+        ).get(id=conversation_id)
+    except Conversation.DoesNotExist:
+        return Response(
+            {"error": "Conversation not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    svc = LabelService()
+
+    if request.method == "GET":
+        labels = svc.get_labels(conversation)
+        return Response({
+            "conversation_id": str(conversation_id),
+            "labels": labels,
+        })
+
+    # Validate request body for POST / PUT / DELETE
+    serializer = ApplyLabelsSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    label_names = serializer.validated_data["labels"]
+    applied_by  = str(getattr(request.user, "pk", ""))[:20]
+
+    if request.method == "POST":
+        svc.apply_labels(conversation, label_names, applied_by)
+        action = "applied"
+
+    elif request.method == "PUT":
+        svc.set_labels(conversation, label_names, applied_by)
+        action = "replaced"
+
+    elif request.method == "DELETE":
+        svc.remove_labels(conversation, label_names)
+        action = "removed"
+
+    return Response({
+        "status":          action,
+        "conversation_id": str(conversation_id),
+        "labels":          svc.get_labels(conversation),
+    })
+
+
+# ─── Agents: CRUD ─────────────────────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def agent_list(request):
+    """
+    List all agents or create a new one.
+
+    GET  /api/agents/
+    POST /api/agents/
+    {
+        "business": "<uuid>",
+        "name": "Alice Wanjiru",
+        "email": "alice@company.com",
+        "max_conversations": 15
+    }
+    """
+    if request.method == "GET":
+        qs = Agent.objects.select_related("business").all()
+
+        business_id = request.GET.get("business_id")
+        if business_id:
+            qs = qs.filter(business__id=business_id)
+
+        status_filter = request.GET.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        return Response(AgentSerializer(qs, many=True).data)
+
+    serializer = AgentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    agent = serializer.save()
+    logger.info(
+        "Agent created | name=%s | email=%s | business=%s",
+        agent.name, agent.email, agent.business.name,
+    )
+    return Response(AgentSerializer(agent).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def agent_detail(request, agent_id):
+    """GET / PATCH / DELETE  /api/agents/<id>/"""
+    try:
+        agent = Agent.objects.select_related("business").get(id=agent_id)
+    except Agent.DoesNotExist:
+        return Response(
+            {"error": "Agent not found"}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if request.method == "GET":
+        return Response(AgentSerializer(agent).data)
+
+    if request.method == "DELETE":
+        name = agent.name
+        agent.delete()
+        return Response({"status": "deleted", "name": name})
+
+    serializer = AgentSerializer(agent, data=request.data, partial=True)
+    if serializer.is_valid():
+        return Response(AgentSerializer(serializer.save()).data)
+    return Response(
+        {"status": "error", "errors": serializer.errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def agent_workload(request, agent_id):
+    """
+    Get full workload breakdown for one agent.
+
+    GET /api/agents/<id>/workload/
+    """
+    try:
+        agent = Agent.objects.select_related("business").get(id=agent_id)
+    except Agent.DoesNotExist:
+        return Response(
+            {"error": "Agent not found"}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    # Get assigned conversations
+    conversations = Conversation.objects.filter(
+        business=agent.business,
+        assigned_to=agent.email,
+        status=Conversation.Status.OPEN,
+    ).select_related("contact").prefetch_related("messages")
+
+    from .serializers import ConversationSerializer as ConvSer
+
+    return Response({
+        "agent":                AgentSerializer(agent).data,
+        "active_conversations": ConvSer(conversations, many=True).data,
+        "stats": {
+            "open":          conversations.count(),
+            "capacity":      agent.max_conversations,
+            "available_slots": max(
+                0, agent.max_conversations - conversations.count()
+            ),
+            "total_assigned":  agent.total_assigned,
+            "total_resolved":  agent.total_resolved,
+        },
+    })
+
+
+# ─── Assignment ───────────────────────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def conversation_assign(request, conversation_id):
+    """
+    Manually assign a conversation to a specific agent.
+
+    POST /api/conversations/<id>/assign/
+    {
+        "agent_id": "<uuid>",
+        "assigned_by": "supervisor@company.com"
+    }
+    """
+    try:
+        conversation = Conversation.objects.select_related(
+            "business"
+        ).get(id=conversation_id)
+    except Conversation.DoesNotExist:
+        return Response(
+            {"error": "Conversation not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    serializer = ManualAssignSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    v = serializer.validated_data
+
+    try:
+        agent = Agent.objects.get(
+            id=v["agent_id"],
+            business=conversation.business,
+        )
+    except Agent.DoesNotExist:
+        return Response(
+            {"error": "Agent not found in this business"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    engine = AssignmentEngine()
+    engine.manual_assign(
+        conversation=conversation,
+        agent=agent,
+        assigned_by=v.get("assigned_by", ""),
+    )
+
+    return Response({
+        "status":          "assigned",
+        "conversation_id": str(conversation_id),
+        "agent": {
+            "id":    str(agent.id),
+            "name":  agent.name,
+            "email": agent.email,
+        },
+        "assignment_type": "manual",
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def conversation_unassign(request, conversation_id):
+    """
+    Remove agent assignment from a conversation.
+
+    POST /api/conversations/<id>/unassign/
+    { "reason": "agent_unavailable" }    ← optional
+    """
+    try:
+        conversation = Conversation.objects.get(id=conversation_id)
+    except Conversation.DoesNotExist:
+        return Response(
+            {"error": "Conversation not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    reason = request.data.get("reason", "")
+    engine = AssignmentEngine()
+    unassigned = engine.unassign(conversation, reason=reason)
+
+    return Response({
+        "status":          "unassigned" if unassigned else "was_not_assigned",
+        "conversation_id": str(conversation_id),
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def conversation_assignment_history(request, conversation_id):
+    """
+    Full assignment audit trail for a conversation.
+
+    GET /api/conversations/<id>/assignments/
+    """
+    try:
+        conversation = Conversation.objects.get(id=conversation_id)
+    except Conversation.DoesNotExist:
+        return Response(
+            {"error": "Conversation not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    logs = AssignmentLog.objects.filter(
+        conversation=conversation
+    ).select_related("agent").order_by("-created_at")
+
+    return Response({
+        "conversation_id": str(conversation_id),
+        "current_agent":   conversation.assigned_to or None,
+        "history":         AssignmentLogSerializer(logs, many=True).data,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def team_workload(request):
+    """
+    Get workload overview for all agents in a business.
+    Great for a supervisor dashboard.
+
+    GET /api/agents/workload/?business_id=<uuid>
+    """
+    business_id = request.GET.get("business_id")
+    if not business_id:
+        return Response(
+            {"error": "business_id query param is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        business = BusinessAccount.objects.get(
+            id=business_id, is_active=True
+        )
+    except BusinessAccount.DoesNotExist:
+        return Response(
+            {"error": "BusinessAccount not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    engine   = AssignmentEngine()
+    workload = engine.get_agent_workload(business)
+
+    return Response({
+        "business":     business.name,
+        "agent_count":  len(workload),
+        "available":    sum(1 for a in workload if a["is_available"]),
+        "agents":       workload,
     })    
