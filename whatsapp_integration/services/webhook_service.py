@@ -8,6 +8,7 @@ from .webhook_dispatcher import WebhookDispatcher
 from .event_builder import EventBuilder
 
 from .assignment_engine import AssignmentEngine
+from .language_detector import LanguageDetector
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,27 @@ class WebhookService:
         if not created:
             logger.info("Duplicate message ignored: %s", provider_id)
             return None
+        
+        # ── Detect language on inbound messages ───────────────────────────────
+        if message.direction == Message.Direction.INBOUND and message.body:
+            try:
+                detector = LanguageDetector()
+                result   = detector.detect(message.body)
+                message.detected_language  = result.language
+                message.language_confidence = result.confidence
+                message.save(update_fields=[
+                    "detected_language",
+                    "language_confidence",
+                    "updated_at",
+                ])
+                logger.info(
+                    "Language detected | message=%s | lang=%s | conf=%.2f",
+                    message.id, result.language, result.confidence,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Language detection failed (non-fatal): %s", exc
+                )
 
         media_items = normalized.get("media_items", [])
         if media_items:

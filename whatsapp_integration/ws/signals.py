@@ -1,7 +1,7 @@
 import logging
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from .models import Message, Conversation, Agent, WhatsAppContact
+from ..models import Message, Conversation, Agent, WhatsAppContact
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ def on_message_saved(sender, instance: Message, created: bool, **kwargs):
     Push WebSocket event when a message is created or its status changes.
     """
     try:
-        from .ws.channel_utils import push_to_business, push_to_conversation
+        from ..ws.channel_utils import push_to_business, push_to_conversation
 
         conv        = instance.conversation
         business_id = str(conv.business_id)
@@ -58,7 +58,7 @@ def on_conversation_saved(
 ):
     """Push WebSocket event when a conversation is created or updated."""
     try:
-        from .ws.channel_utils import push_to_business
+        from ..ws.channel_utils import push_to_business
 
         business_id = str(instance.business_id)
 
@@ -91,7 +91,7 @@ def on_conversation_saved(
 def on_agent_saved(sender, instance: Agent, created: bool, **kwargs):
     """Push WebSocket event when an agent status changes."""
     try:
-        from .ws.channel_utils import push_to_business, push_to_agent
+        from ..ws.channel_utils import push_to_business, push_to_agent
 
         business_id = str(instance.business_id)
         agent_id    = str(instance.id)
@@ -123,7 +123,7 @@ def on_contact_saved(
         return
 
     try:
-        from .ws.channel_utils import push_to_business
+        from ..ws.channel_utils import push_to_business
 
         push_to_business(
             str(instance.business_id),
