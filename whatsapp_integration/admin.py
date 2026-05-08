@@ -43,12 +43,16 @@ class MessageAdmin(admin.ModelAdmin):
 class AutoReplyRuleAdmin(admin.ModelAdmin):
     list_display = (
         "name", "business", "match_type", "keyword",
+        "language",         
         "is_active", "is_fallback", "priority", "trigger_count",
     )
-    list_filter = ("business", "is_active", "is_fallback", "match_type")
+    list_filter = (
+        "business", "is_active", "is_fallback",
+        "match_type", "language",   
+    )
     search_fields = ("name", "keyword", "reply_text")
     readonly_fields = ("trigger_count", "created_at", "updated_at")
-    ordering = ("business", "priority")    
+    ordering = ("business", "language", "priority")
     
 @admin.register(MediaAttachment)
 class MediaAttachmentAdmin(admin.ModelAdmin):
