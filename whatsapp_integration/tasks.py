@@ -529,3 +529,44 @@ def cleanup_expired_api_keys():
     expired = svc.cleanup_expired()
     logger.info("API key cleanup | expired=%d", expired)
     return {"expired_keys": expired}    
+
+# ─── Analytics Snapshot Task ──────────────────────────────────────────────────
+
+@shared_task(
+    name="whatsapp.analytics_snapshot",
+    queue="scheduled",
+)
+def analytics_snapshot():
+    """
+    Scheduled task: pre-compute analytics for all active businesses.
+    Runs every hour — results logged for monitoring.
+    Extend to store in Redis/cache for fast dashboard loads.
+    """
+    from .services.analytics_service import AnalyticsService
+    from .models import BusinessAccount
+
+    svc       = AnalyticsService()
+    businesses = BusinessAccount.objects.filter(is_active=True)
+    results   = []
+
+    for biz in businesses:
+        try:
+            overview = svc.overview(business_id=str(biz.id))
+            results.append({
+                "business": biz.name,
+                "messages": overview["messages"]["total"],
+                "open_conversations": overview["conversations"]["open"],
+            })
+            logger.info(
+                "Analytics snapshot | business=%s | messages=%d | open_convs=%d",
+                biz.name,
+                overview["messages"]["total"],
+                overview["conversations"]["open"],
+            )
+        except Exception as exc:
+            logger.error(
+                "Analytics snapshot failed | business=%s | error=%s",
+                biz.name, exc,
+            )
+
+    return {"businesses_processed": len(results), "results": results}
