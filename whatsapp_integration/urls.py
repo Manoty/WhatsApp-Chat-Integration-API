@@ -22,10 +22,14 @@ urlpatterns = [
     path("tasks/<str:task_id>/", views.task_status, name="task-status"),
 
     # ── Conversations ─────────────────────────────────────────────────────────
-    path("conversations/",                                 views.conversation_list,     name="conversation-list"),
-    path("conversations/<uuid:conversation_id>/",          views.conversation_detail,   name="conversation-detail"),
-    path("conversations/<uuid:conversation_id>/messages/", views.conversation_messages, name="conversation-messages"),
-    path("conversations/<uuid:conversation_id>/media/",    views.conversation_media,    name="conversation-media"),
+    path("conversations/",                                      views.conversation_list,             name="conversation-list"),
+    path("conversations/<uuid:conversation_id>/",               views.conversation_detail,           name="conversation-detail"),
+    path("conversations/<uuid:conversation_id>/messages/",      views.conversation_messages,         name="conversation-messages"),
+    path("conversations/<uuid:conversation_id>/media/",         views.conversation_media,            name="conversation-media"),
+    path("conversations/<uuid:conversation_id>/labels/",        views.conversation_label_manage,     name="conversation-labels"),
+    path("conversations/<uuid:conversation_id>/assign/",        views.conversation_assign,           name="conversation-assign"),
+    path("conversations/<uuid:conversation_id>/unassign/",      views.conversation_unassign,         name="conversation-unassign"),
+    path("conversations/<uuid:conversation_id>/assignments/",   views.conversation_assignment_history, name="conversation-assignments"),
 
     # ── Contacts ──────────────────────────────────────────────────────────────
     path("contacts/",                   views.contact_list,   name="contact-list"),
@@ -46,12 +50,12 @@ urlpatterns = [
     path("templates/<uuid:template_id>/history/", views.template_send_history, name="template-send-history"),
 
     # ── Webhooks Out ──────────────────────────────────────────────────────────
-    path("webhooks/events/",                                   views.webhook_event_types,      name="webhook-event-types"),
-    path("webhooks/endpoints/",                                views.webhook_endpoint_list,     name="webhook-endpoint-list"),
-    path("webhooks/endpoints/<uuid:endpoint_id>/",             views.webhook_endpoint_detail,   name="webhook-endpoint-detail"),
-    path("webhooks/endpoints/<uuid:endpoint_id>/test/",        views.webhook_endpoint_test,     name="webhook-endpoint-test"),
-    path("webhooks/endpoints/<uuid:endpoint_id>/logs/",        views.webhook_delivery_logs,     name="webhook-delivery-logs"),
-    
+    path("webhooks/events/",                               views.webhook_event_types,    name="webhook-event-types"),
+    path("webhooks/endpoints/",                            views.webhook_endpoint_list,  name="webhook-endpoint-list"),
+    path("webhooks/endpoints/<uuid:endpoint_id>/",         views.webhook_endpoint_detail,name="webhook-endpoint-detail"),
+    path("webhooks/endpoints/<uuid:endpoint_id>/test/",    views.webhook_endpoint_test,  name="webhook-endpoint-test"),
+    path("webhooks/endpoints/<uuid:endpoint_id>/logs/",    views.webhook_delivery_logs,  name="webhook-delivery-logs"),
+
     # ── API Key Management ────────────────────────────────────────────────────
     path("keys/",                      views.api_key_list,   name="api-key-list"),
     path("keys/verify/",               views.api_key_verify, name="api-key-verify"),
@@ -59,4 +63,14 @@ urlpatterns = [
     path("keys/<uuid:key_id>/revoke/", views.api_key_revoke, name="api-key-revoke"),
     path("keys/<uuid:key_id>/rotate/", views.api_key_rotate, name="api-key-rotate"),
     path("keys/<uuid:key_id>/stats/",  views.api_key_stats,  name="api-key-stats"),
+
+    # ── Labels ────────────────────────────────────────────────────────────────
+    path("labels/",                views.label_list,   name="label-list"),
+    path("labels/<uuid:label_id>/", views.label_detail, name="label-detail"),
+
+    # ── Agents ────────────────────────────────────────────────────────────────
+    path("agents/",                              views.agent_list,     name="agent-list"),
+    path("agents/workload/",                     views.team_workload,  name="team-workload"),
+    path("agents/<uuid:agent_id>/",              views.agent_detail,   name="agent-detail"),
+    path("agents/<uuid:agent_id>/workload/",     views.agent_workload, name="agent-workload"),
 ]
