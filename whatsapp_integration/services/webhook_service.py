@@ -7,6 +7,8 @@ from .media_service import MediaService
 from .webhook_dispatcher import WebhookDispatcher
 from .event_builder import EventBuilder
 
+from .assignment_engine import AssignmentEngine
+
 logger = logging.getLogger(__name__)
 
 
@@ -176,7 +178,9 @@ class WebhookService:
     # ─────────────────────────────────────────────────────────────
     # CONVERSATION
     # ─────────────────────────────────────────────────────────────
-    def _get_or_create_conversation(self, business, contact) -> Conversation:
+    def _get_or_create_conversation(
+        self, business, contact
+    ) -> Conversation:
         conversation = Conversation.objects.filter(
             business=business,
             contact=contact,
@@ -189,9 +193,26 @@ class WebhookService:
                 contact=contact,
                 status=Conversation.Status.OPEN,
             )
+            logger.info(
+                "New conversation started: %s for contact: %s",
+                conversation.id, contact.phone_number,
+            )
+
+            # ── Auto-assign to next available agent ───────────────────────────
+            try:
+                engine = AssignmentEngine()
+                agent  = engine.auto_assign(conversation)
+                if agent:
+                    logger.info(
+                        "Conversation auto-assigned | conv=%s | agent=%s",
+                        conversation.id, agent.email,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Auto-assignment failed (non-fatal): %s", exc
+                )
 
         return conversation
-
     # ─────────────────────────────────────────────────────────────
     # MESSAGE STORAGE
     # ─────────────────────────────────────────────────────────────
