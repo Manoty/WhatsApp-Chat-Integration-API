@@ -51,4 +51,12 @@ urlpatterns = [
     path("webhooks/endpoints/<uuid:endpoint_id>/",             views.webhook_endpoint_detail,   name="webhook-endpoint-detail"),
     path("webhooks/endpoints/<uuid:endpoint_id>/test/",        views.webhook_endpoint_test,     name="webhook-endpoint-test"),
     path("webhooks/endpoints/<uuid:endpoint_id>/logs/",        views.webhook_delivery_logs,     name="webhook-delivery-logs"),
+    
+    # ── API Key Management ────────────────────────────────────────────────────
+    path("keys/",                      views.api_key_list,   name="api-key-list"),
+    path("keys/verify/",               views.api_key_verify, name="api-key-verify"),
+    path("keys/<uuid:key_id>/",        views.api_key_detail, name="api-key-detail"),
+    path("keys/<uuid:key_id>/revoke/", views.api_key_revoke, name="api-key-revoke"),
+    path("keys/<uuid:key_id>/rotate/", views.api_key_rotate, name="api-key-rotate"),
+    path("keys/<uuid:key_id>/stats/",  views.api_key_stats,  name="api-key-stats"),
 ]
