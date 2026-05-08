@@ -11,6 +11,7 @@ from .models import (
     TemplateSend,
     WebhookEndpoint,     
     WebhookDeliveryLog,
+    APIKey,
 )
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
@@ -353,4 +354,81 @@ class WebhookDeliveryLogSerializer(serializers.ModelSerializer):
             "attempt_number", "duration_ms", "delivered_at",
             "created_at",
         ]
-        read_only_fields = fields    
+        read_only_fields = fields   
+        
+        
+class APIKeySerializer(serializers.ModelSerializer):
+    """
+    Safe serializer — never exposes key_hash or raw key.
+    The raw key is only returned by the create/rotate endpoints.
+    """
+    business_name = serializers.CharField(
+        source="business.name", read_only=True
+    )
+    is_expired = serializers.SerializerMethodField()
+    days_until_expiry = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = APIKey
+        fields = [
+            "id", "business", "business_name", "name",
+            "prefix", "scope", "status",
+            "expiry_at", "last_used_at", "request_count",
+            "allowed_ips", "rotated_from",
+            "is_expired", "days_until_expiry",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "prefix", "status", "last_used_at",
+            "request_count", "rotated_from",
+            "is_expired", "days_until_expiry",
+            "created_at", "updated_at",
+        ]
+
+    def get_is_expired(self, obj) -> bool:
+        if obj.expiry_at:
+            from django.utils import timezone
+            return timezone.now() > obj.expiry_at
+        return False
+
+    def get_days_until_expiry(self, obj):
+        if not obj.expiry_at:
+            return None
+        from django.utils import timezone
+        delta = obj.expiry_at - timezone.now()
+        return max(0, delta.days)
+
+
+class CreateAPIKeySerializer(serializers.Serializer):
+    """Validates POST /api/keys/"""
+    business_id  = serializers.UUIDField()
+    name         = serializers.CharField(max_length=255)
+    scope        = serializers.ChoiceField(
+        choices=APIKey.Scope.choices,
+        default=APIKey.Scope.WRITE,
+    )
+    expiry_at    = serializers.DateTimeField(
+        required=False,
+        allow_null=True,
+        help_text="ISO 8601 datetime. Null = never expires.",
+    )
+    allowed_ips  = serializers.ListField(
+        child=serializers.IPAddressField(),
+        default=list,
+        required=False,
+        help_text="Optional IP allowlist. Empty = all IPs allowed.",
+    )
+
+    def validate_expiry_at(self, value):
+        if value:
+            from django.utils import timezone
+            if value <= timezone.now():
+                raise serializers.ValidationError(
+                    "expiry_at must be a future datetime."
+                )
+        return value
+
+    def validate_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Name cannot be empty.")
+        return value.strip()         
