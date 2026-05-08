@@ -2294,3 +2294,63 @@ def analytics_full(request):
             {"error": "Failed to compute full analytics"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )    
+        
+# ─── WebSocket Info ───────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def websocket_info(request):
+    """
+    Returns WebSocket connection URLs for this business.
+    Clients use this to know which WS URL to connect to.
+
+    GET /api/ws/info/
+    """
+    from django.conf import settings
+
+    host = request.get_host()
+    scheme = "wss" if request.is_secure() else "ws"
+
+    business_id = request.GET.get("business_id", "<business_id>")
+
+    return Response({
+        "websocket_urls": {
+            "business":     f"{scheme}://{host}/ws/business/{business_id}/",
+            "conversation": f"{scheme}://{host}/ws/conversation/<conversation_id>/",
+            "agent":        f"{scheme}://{host}/ws/agent/<agent_id>/",
+        },
+        "authentication": {
+            "method":    "query_param",
+            "db_key":    "?api_key=sk_live_xxx",
+            "legacy_key":"?legacy_key=dev-key-12345",
+            "example":   f"{scheme}://{host}/ws/business/{business_id}/?api_key=sk_live_xxx",
+        },
+        "events": {
+            "server_to_client": [
+                "connection.established",
+                "message.received",
+                "message.sent",
+                "message.delivered",
+                "message.read",
+                "message.failed",
+                "message.status_changed",
+                "conversation.opened",
+                "conversation.closed",
+                "conversation.updated",
+                "conversation.assigned",
+                "agent.created",
+                "agent.status_changed",
+                "contact.created",
+                "pong",
+            ],
+            "client_to_server": [
+                "ping",
+                "typing.start",
+                "typing.stop",
+            ],
+        },
+        "close_codes": {
+            "4001": "Authentication failed",
+            "4003": "Access denied to this resource",
+        },
+    })        
