@@ -48,18 +48,6 @@ class MediaAttachmentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-class MessageSerializer(serializers.ModelSerializer):
-    media_attachment = MediaAttachmentSerializer(read_only=True)
-
-    class Meta:
-        model = Message
-        fields = [
-            "id", "conversation", "direction", "message_type",
-            "body", "provider_message_id", "status",
-            "status_updated_at", "created_at",
-            "media_attachment",        # ← NEW
-        ]
-        read_only_fields = ["id", "created_at", "status_updated_at"]
 
 class ConversationSerializer(serializers.ModelSerializer):
     contact      = WhatsAppContactSerializer(read_only=True)
@@ -146,6 +134,7 @@ class AutoReplyRuleSerializer(serializers.ModelSerializer):
         model = AutoReplyRule
         fields = [
             "id", "business", "name", "keyword", "match_type",
+            "language",  
             "reply_text", "is_active", "is_fallback", "priority",
             "trigger_count", "created_at", "updated_at",
         ]
@@ -566,4 +555,38 @@ class ManualAssignSerializer(serializers.Serializer):
     assigned_by = serializers.CharField(
         max_length=255, required=False, default=""
     )    
+ 
+class LanguageDetectSerializer(serializers.Serializer):
+    """Validates POST /api/language/detect/"""
+    text = serializers.CharField(
+        min_length=1,
+        max_length=4096,
+        help_text="Text to detect language from",
+    )
+
+
+class MessageSerializer(serializers.ModelSerializer):
+    """Updated to include language detection fields."""
+    media_attachment    = MediaAttachmentSerializer(read_only=True)
+    language_name       = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Message
+        fields = [
+            "id", "conversation", "direction", "message_type",
+            "body", "provider_message_id", "status",
+            "detected_language", "language_confidence", "language_name",
+            "status_updated_at", "created_at",
+            "media_attachment",
+        ]
+        read_only_fields = [
+            "id", "created_at", "status_updated_at",
+            "detected_language", "language_confidence",
+        ]
+
+    def get_language_name(self, obj) -> str:
+        if not obj.detected_language:
+            return ""
+        from .services.language_detector import SUPPORTED_LANGUAGES
+        return SUPPORTED_LANGUAGES.get(obj.detected_language, obj.detected_language) 
     
