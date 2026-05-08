@@ -285,6 +285,25 @@ def conversation_detail(request, conversation_id):
         for field, value in updates.items():
             setattr(conversation, field, value)
         conversation.save(update_fields=list(updates.keys()) + ["updated_at"])
+        
+        # If closing — mark agent's resolution + unassign
+        if updates.get("status") == "closed" and conversation.assigned_to:
+            try:
+                from .models import Agent
+                from .services.assignment_engine import AssignmentEngine
+                agent = Agent.objects.filter(
+                    business=conversation.business,
+                    email=conversation.assigned_to,
+                ).first()
+                if agent:
+                    agent.increment_resolved()
+                AssignmentEngine().unassign(
+                    conversation, reason="conversation_closed"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Agent resolution tracking failed (non-fatal): %s", exc
+                )
         # Dispatch webhook event if conversation was closed
         if updates.get("status") == "closed":
             try:
