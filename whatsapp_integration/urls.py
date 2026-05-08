@@ -73,4 +73,15 @@ urlpatterns = [
     path("agents/workload/",                     views.team_workload,  name="team-workload"),
     path("agents/<uuid:agent_id>/",              views.agent_detail,   name="agent-detail"),
     path("agents/<uuid:agent_id>/workload/",     views.agent_workload, name="agent-workload"),
+    
+    # ── Analytics ─────────────────────────────────────────────────────────────
+    path("analytics/overview/",       views.analytics_overview,      name="analytics-overview"),
+    path("analytics/messages/",       views.analytics_messages,      name="analytics-messages"),
+    path("analytics/conversations/",  views.analytics_conversations, name="analytics-conversations"),
+    path("analytics/agents/",         views.analytics_agents,        name="analytics-agents"),
+    path("analytics/contacts/",       views.analytics_contacts,      name="analytics-contacts"),
+    path("analytics/auto-replies/",   views.analytics_auto_replies,  name="analytics-auto-replies"),
+    path("analytics/templates/",      views.analytics_templates,     name="analytics-templates"),
+    path("analytics/response-time/",  views.analytics_response_time, name="analytics-response-time"),
+    path("analytics/full/",           views.analytics_full,          name="analytics-full"),
 ]
