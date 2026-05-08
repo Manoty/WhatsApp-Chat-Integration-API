@@ -127,3 +127,33 @@ class WebhookDeliveryLogAdmin(admin.ModelAdmin):
         "payload", "response_body", "error_message",
         "delivered_at", "created_at",
     )    
+    
+    
+from .models import APIKey
+
+@admin.register(APIKey)
+class APIKeyAdmin(admin.ModelAdmin):
+    list_display = (
+        "name", "prefix", "business", "scope",
+        "status", "request_count", "last_used_at",
+        "expiry_at", "created_at",
+    )
+    list_filter  = ("status", "scope", "business")
+    search_fields = ("name", "prefix")
+    readonly_fields = (
+        "prefix", "key_hash", "request_count",
+        "last_used_at", "rotated_from",
+        "created_at", "updated_at",
+    )
+    # Never show the hash in list view
+    exclude = ()
+
+    actions = ["revoke_selected_keys"]
+
+    def revoke_selected_keys(self, request, queryset):
+        count = 0
+        for key in queryset.filter(status=APIKey.Status.ACTIVE):
+            key.revoke()
+            count += 1
+        self.message_user(request, f"Revoked {count} API key(s).")
+    revoke_selected_keys.short_description = "Revoke selected keys"    
