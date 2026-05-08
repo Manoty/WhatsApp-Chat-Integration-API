@@ -13,6 +13,7 @@ from .models import (
     BusinessAccount, WhatsAppContact,
     Conversation, Message, AutoReplyRule,
 )
+
 from .serializers import (
     SendMessageRequestSerializer,
     ConversationSerializer,
@@ -54,7 +55,11 @@ from .models import APIKey
 from .serializers import APIKeySerializer, CreateAPIKeySerializer
 from .services.api_key_service import APIKeyService
 
+
+from .services.analytics_service import AnalyticsService
+
 logger = logging.getLogger(__name__)
+
 
 
 # ─── System ───────────────────────────────────────────────────────────────────
@@ -1997,3 +2002,294 @@ def team_workload(request):
         "available":    sum(1 for a in workload if a["is_available"]),
         "agents":       workload,
     })    
+    
+# ─── Analytics ───────────────────────────────────────────────────────────────
+
+def _parse_analytics_params(request) -> dict:
+    """
+    Extract and parse common analytics query params.
+    Returns dict with business_id, date_from, date_to, granularity.
+    """
+    from django.utils.dateparse import parse_datetime
+    from django.utils import timezone as tz
+
+    business_id = request.GET.get("business_id", "")
+
+    raw_from = request.GET.get("date_from")
+    raw_to   = request.GET.get("date_to")
+
+    date_from = parse_datetime(raw_from) if raw_from else (
+        tz.now() - timedelta(days=30)
+    )
+    date_to   = parse_datetime(raw_to) if raw_to else tz.now()
+
+    if date_from and timezone.is_naive(date_from):
+        date_from = timezone.make_aware(date_from)
+    if date_to and timezone.is_naive(date_to):
+        date_to = timezone.make_aware(date_to)
+
+    granularity = request.GET.get("granularity", "day")
+    if granularity not in ("hour", "day", "week", "month"):
+        granularity = "day"
+
+    return {
+        "business_id": business_id,
+        "date_from":   date_from,
+        "date_to":     date_to,
+        "granularity": granularity,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_overview(request):
+    """
+    High-level KPI dashboard — totals + period deltas.
+
+    GET /api/analytics/overview/
+    Query params:
+      ?business_id=<uuid>
+      ?date_from=2026-04-01T00:00:00Z
+      ?date_to=2026-05-01T00:00:00Z
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.overview(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics overview error: %s", exc)
+        return Response(
+            {"error": "Failed to compute analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_messages(request):
+    """
+    Message volume over time, split by direction + type.
+
+    GET /api/analytics/messages/
+    Query params:
+      ?business_id=<uuid>
+      ?date_from=...  ?date_to=...
+      ?granularity=hour|day|week|month
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.messages(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+            granularity=params["granularity"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics messages error: %s", exc)
+        return Response(
+            {"error": "Failed to compute message analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_conversations(request):
+    """
+    Conversation open/close rates and resolution stats.
+
+    GET /api/analytics/conversations/
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.conversations(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics conversations error: %s", exc)
+        return Response(
+            {"error": "Failed to compute conversation analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_agents(request):
+    """
+    Agent performance, assignment counts, resolution rates.
+
+    GET /api/analytics/agents/
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.agents(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics agents error: %s", exc)
+        return Response(
+            {"error": "Failed to compute agent analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_contacts(request):
+    """
+    Contact growth over time, opt-in rates, most active contacts.
+
+    GET /api/analytics/contacts/
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.contacts(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics contacts error: %s", exc)
+        return Response(
+            {"error": "Failed to compute contact analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_auto_replies(request):
+    """
+    Auto-reply rule performance: trigger counts, match rates.
+
+    GET /api/analytics/auto-replies/
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.auto_replies(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics auto-replies error: %s", exc)
+        return Response(
+            {"error": "Failed to compute auto-reply analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_templates(request):
+    """
+    Template delivery rates, read rates, per-template breakdown.
+
+    GET /api/analytics/templates/
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.templates(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics templates error: %s", exc)
+        return Response(
+            {"error": "Failed to compute template analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_response_time(request):
+    """
+    Response time distribution buckets and averages.
+
+    GET /api/analytics/response-time/
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    try:
+        data = svc.response_time(
+            business_id=params["business_id"],
+            date_from=params["date_from"],
+            date_to=params["date_to"],
+        )
+        return Response(data)
+    except Exception as exc:
+        logger.exception("Analytics response time error: %s", exc)
+        return Response(
+            {"error": "Failed to compute response time analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_full(request):
+    """
+    All analytics in one call — useful for dashboard initial load.
+
+    GET /api/analytics/full/
+    ⚠️  More expensive than individual endpoints.
+        Cache this response client-side.
+    """
+    params = _parse_analytics_params(request)
+    svc    = AnalyticsService()
+
+    kwargs = {
+        "business_id": params["business_id"],
+        "date_from":   params["date_from"],
+        "date_to":     params["date_to"],
+    }
+
+    try:
+        return Response({
+            "overview":       svc.overview(**kwargs),
+            "messages":       svc.messages(**kwargs, granularity=params["granularity"]),
+            "conversations":  svc.conversations(**kwargs),
+            "agents":         svc.agents(**kwargs),
+            "contacts":       svc.contacts(**kwargs),
+            "auto_replies":   svc.auto_replies(**kwargs),
+            "templates":      svc.templates(**kwargs),
+            "response_time":  svc.response_time(**kwargs),
+        })
+    except Exception as exc:
+        logger.exception("Analytics full error: %s", exc)
+        return Response(
+            {"error": "Failed to compute full analytics"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )    
