@@ -157,3 +157,41 @@ class APIKeyAdmin(admin.ModelAdmin):
             count += 1
         self.message_user(request, f"Revoked {count} API key(s).")
     revoke_selected_keys.short_description = "Revoke selected keys"    
+    
+from .models import Label, ConversationLabel, Agent, AssignmentLog
+
+@admin.register(Label)
+class LabelAdmin(admin.ModelAdmin):
+    list_display  = ("name", "colour", "business", "is_active", "created_at")
+    list_filter   = ("colour", "business", "is_active")
+    search_fields = ("name",)
+
+@admin.register(ConversationLabel)
+class ConversationLabelAdmin(admin.ModelAdmin):
+    list_display  = ("label", "conversation", "applied_by", "created_at")
+    list_filter   = ("label",)
+    search_fields = ("label__name",)
+
+@admin.register(Agent)
+class AgentAdmin(admin.ModelAdmin):
+    list_display  = (
+        "name", "email", "business", "status",
+        "max_conversations", "total_assigned",
+        "total_resolved", "last_assigned_at",
+    )
+    list_filter   = ("status", "business")
+    search_fields = ("name", "email")
+    readonly_fields = (
+        "total_assigned", "total_resolved",
+        "last_assigned_at", "created_at",
+    )
+
+@admin.register(AssignmentLog)
+class AssignmentLogAdmin(admin.ModelAdmin):
+    list_display  = (
+        "conversation", "agent", "assignment_type",
+        "assigned_by", "unassigned_at", "created_at",
+    )
+    list_filter   = ("assignment_type",)
+    search_fields = ("agent__email", "assigned_by")
+    readonly_fields = ("created_at",)    
