@@ -685,4 +685,182 @@ class WebhookDeliveryLog(TimeStampedModel):
             f"{self.event_type} → {self.endpoint.url[:40]} "
             f"[{self.status}] attempt={self.attempt_number}"
         )        
-              
+      
+      
+# ─── API Key Management ───────────────────────────────────────────────────────
+
+class APIKey(TimeStampedModel):
+    """
+    A database-backed API key for authenticating requests.
+
+    Keys are stored as SHA-256 hashes — the raw key is shown
+    ONCE on creation and never stored in plaintext.
+
+    Scopes:
+      read  — GET requests only
+      write — GET + POST + PUT + PATCH
+      admin — full access including key management
+
+    Status:
+      active  — valid and usable
+      revoked — manually invalidated
+      expired — past expiry_at date
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE  = "active",  "Active"
+        REVOKED = "revoked", "Revoked"
+        EXPIRED = "expired", "Expired"
+
+    class Scope(models.TextChoices):
+        READ  = "read",  "Read Only"
+        WRITE = "write", "Read + Write"
+        ADMIN = "admin", "Full Admin"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(
+        BusinessAccount,
+        on_delete=models.CASCADE,
+        related_name="api_keys",
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text="Human label e.g. 'Production App Key' or 'CI/CD Pipeline'",
+    )
+    # Prefix shown in listings — first 8 chars of raw key e.g. "sk_live_"
+    prefix = models.CharField(
+        max_length=16,
+        editable=False,
+        help_text="First characters of the raw key for identification",
+    )
+    # SHA-256 hash of the raw key — never store plaintext
+    key_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        editable=False,
+        db_index=True,
+    )
+    scope = models.CharField(
+        max_length=10,
+        choices=Scope.choices,
+        default=Scope.WRITE,
+    )
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    expiry_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Optional expiry. Null = never expires.",
+    )
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    # Track which key this was rotated from (for audit trail)
+    rotated_from = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="rotated_to",
+    )
+    # Optional IP allowlist — empty = allow all IPs
+    allowed_ips = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Optional list of allowed IP addresses. Empty = all IPs allowed.",
+    )
+    request_count = models.PositiveBigIntegerField(
+        default=0,
+        editable=False,
+        help_text="Total number of requests made with this key",
+    )
+
+    class Meta:
+        db_table = "api_keys"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} [{self.prefix}...] ({self.status})"
+
+    @property
+    def is_valid(self) -> bool:
+        """Check if this key can be used right now."""
+        if self.status != self.Status.ACTIVE:
+            return False
+        if self.expiry_at and timezone.now() > self.expiry_at:
+            # Auto-expire
+            APIKey.objects.filter(id=self.id).update(
+                status=self.Status.EXPIRED
+            )
+            return False
+        return True
+
+    @classmethod
+    def generate(cls) -> tuple[str, str, str]:
+        """
+        Generate a new raw key + its hash + prefix.
+        Returns (raw_key, key_hash, prefix).
+
+        Raw key format: sk_live_<32 random hex chars>
+        This is shown to the user ONCE and never stored.
+        """
+        import secrets
+        raw_key  = f"sk_live_{secrets.token_hex(32)}"
+        prefix   = raw_key[:12]
+        key_hash = cls._hash_key(raw_key)
+        return raw_key, key_hash, prefix
+
+    @classmethod
+    def _hash_key(cls, raw_key: str) -> str:
+        """SHA-256 hash of the raw key."""
+        import hashlib
+        return hashlib.sha256(raw_key.encode()).hexdigest()
+
+    @classmethod
+    def authenticate(cls, raw_key: str) -> "APIKey | None":
+        """
+        Look up and validate a raw key.
+        Returns the APIKey if valid, None otherwise.
+        Updates last_used_at + request_count on success.
+        """
+        key_hash = cls._hash_key(raw_key)
+        try:
+            api_key = cls.objects.select_related("business").get(
+                key_hash=key_hash,
+            )
+        except cls.DoesNotExist:
+            return None
+
+        if not api_key.is_valid:
+            return None
+
+        # Update usage stats — use F() for thread safety
+        cls.objects.filter(id=api_key.id).update(
+            last_used_at=timezone.now(),
+            request_count=models.F("request_count") + 1,
+        )
+
+        return api_key
+
+    def revoke(self):
+        """Immediately revoke this key."""
+        self.status = self.Status.REVOKED
+        self.save(update_fields=["status", "updated_at"])
+
+    def allows_ip(self, ip: str) -> bool:
+        """Check IP allowlist. Empty list = all IPs allowed."""
+        if not self.allowed_ips:
+            return True
+        return ip in self.allowed_ips
+
+    def allows_method(self, http_method: str) -> bool:
+        """Check if scope permits this HTTP method."""
+        http_method = http_method.upper()
+        if self.scope == self.Scope.READ:
+            return http_method == "GET"
+        if self.scope == self.Scope.WRITE:
+            return http_method in ("GET", "POST", "PUT", "PATCH", "DELETE")
+        if self.scope == self.Scope.ADMIN:
+            return True
+        return False              
