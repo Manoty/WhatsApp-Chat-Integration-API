@@ -12,6 +12,10 @@ from .models import (
     WebhookEndpoint,     
     WebhookDeliveryLog,
     APIKey,
+    Label,              
+    ConversationLabel,  
+    Agent,              
+    AssignmentLog,
 )
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
@@ -432,3 +436,125 @@ class CreateAPIKeySerializer(serializers.Serializer):
         if not value.strip():
             raise serializers.ValidationError("Name cannot be empty.")
         return value.strip()         
+    
+    
+# ─── Label Serializers ────────────────────────────────────────────────────────
+
+class LabelSerializer(serializers.ModelSerializer):
+    conversation_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Label
+        fields = [
+            "id", "business", "name", "colour",
+            "description", "is_active",
+            "conversation_count", "created_at",
+        ]
+        read_only_fields = ["id", "created_at", "conversation_count"]
+
+    def validate_name(self, value):
+        value = value.strip().lower()
+        if not value:
+            raise serializers.ValidationError("Label name cannot be empty.")
+        if len(value) > 50:
+            raise serializers.ValidationError(
+                "Label name cannot exceed 50 characters."
+            )
+        return value
+
+    def get_conversation_count(self, obj) -> int:
+        return obj.conversation_labels.count()
+
+
+class ConversationLabelSerializer(serializers.ModelSerializer):
+    label_name   = serializers.CharField(source="label.name",   read_only=True)
+    label_colour = serializers.CharField(source="label.colour", read_only=True)
+
+    class Meta:
+        model  = ConversationLabel
+        fields = [
+            "id", "label", "label_name", "label_colour",
+            "applied_by", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class ApplyLabelsSerializer(serializers.Serializer):
+    """Validates PATCH /api/conversations/<id>/labels/"""
+    labels = serializers.ListField(
+        child=serializers.CharField(max_length=50),
+        min_length=1,
+        help_text="List of label names to apply",
+    )
+
+
+# ─── Agent Serializers ────────────────────────────────────────────────────────
+
+class AgentSerializer(serializers.ModelSerializer):
+    active_conversations = serializers.SerializerMethodField()
+    is_available         = serializers.SerializerMethodField()
+    capacity_pct         = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Agent
+        fields = [
+            "id", "business", "name", "email", "status",
+            "max_conversations", "active_conversations",
+            "is_available", "capacity_pct",
+            "total_assigned", "total_resolved",
+            "last_assigned_at", "created_at",
+        ]
+        read_only_fields = [
+            "id", "active_conversations", "is_available",
+            "capacity_pct", "total_assigned", "total_resolved",
+            "last_assigned_at", "created_at",
+        ]
+
+    def get_active_conversations(self, obj) -> int:
+        return obj.active_conversation_count
+
+    def get_is_available(self, obj) -> bool:
+        return obj.is_available
+
+    def get_capacity_pct(self, obj) -> int:
+        if not obj.max_conversations:
+            return 0
+        return round(
+            (obj.active_conversation_count / obj.max_conversations) * 100
+        )
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+    def validate_max_conversations(self, value):
+        if value < 1:
+            raise serializers.ValidationError(
+                "max_conversations must be at least 1."
+            )
+        if value > 200:
+            raise serializers.ValidationError(
+                "max_conversations cannot exceed 200."
+            )
+        return value
+
+
+class AssignmentLogSerializer(serializers.ModelSerializer):
+    agent_name  = serializers.CharField(source="agent.name",  read_only=True)
+    agent_email = serializers.CharField(source="agent.email", read_only=True)
+
+    class Meta:
+        model  = AssignmentLog
+        fields = [
+            "id", "conversation", "agent", "agent_name",
+            "agent_email", "assigned_by", "assignment_type",
+            "unassigned_at", "unassignment_reason", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class ManualAssignSerializer(serializers.Serializer):
+    """Validates POST /api/conversations/<id>/assign/"""
+    agent_id    = serializers.UUIDField()
+    assigned_by = serializers.CharField(
+        max_length=255, required=False, default=""
+    )    
