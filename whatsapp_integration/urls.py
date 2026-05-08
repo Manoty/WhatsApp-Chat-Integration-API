@@ -37,7 +37,7 @@ urlpatterns = [
 
     # ── Auto Reply Rules ──────────────────────────────────────────────────────
     path("auto-replies/",                views.auto_reply_rule_list,   name="auto-reply-list"),
-    path("auto-replies/test/",           views.test_auto_reply,        name="auto-reply-test"),
+    path("auto-replies/test/", views.auto_reply_test_with_language, name="auto-reply-test"),    
     path("auto-replies/<uuid:rule_id>/", views.auto_reply_rule_detail, name="auto-reply-detail"),
 
     # ── Templates ─────────────────────────────────────────────────────────────
@@ -84,4 +84,10 @@ urlpatterns = [
     path("analytics/templates/",      views.analytics_templates,     name="analytics-templates"),
     path("analytics/response-time/",  views.analytics_response_time, name="analytics-response-time"),
     path("analytics/full/",           views.analytics_full,          name="analytics-full"),
+    
+    # ── Language ──────────────────────────────────────────────────────────────
+    path("language/detect/",    views.language_detect,    name="language-detect"),
+    path("language/supported/", views.language_supported, name="language-supported"),
+    path("language/breakdown/", views.language_breakdown, name="language-breakdown"),
+    path("language/coverage/",  views.language_coverage,  name="language-coverage"),
 ]
