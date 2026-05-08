@@ -174,6 +174,16 @@ class Message(TimeStampedModel):
     )
     # The actual message content
     body = models.TextField(blank=True, default="")
+    detected_language = models.CharField(
+        max_length=10,
+        blank=True,
+        default="",
+        help_text="ISO 639-1 language code detected from message body e.g. 'en', 'sw'",
+    )
+    language_confidence = models.FloatField(
+        default=0.0,
+        help_text="Confidence score of language detection (0.0 - 1.0)",
+    )
     # WhatsApp's own message ID (for deduplication + status callbacks)
     provider_message_id = models.CharField(
         max_length=255,
@@ -253,6 +263,28 @@ class AutoReplyRule(TimeStampedModel):
         max_length=20,
         choices=MatchType.choices,
         default=MatchType.CONTAINS,
+    )
+    class Language(models.TextChoices):
+        ANY        = "",     "Any Language"      # matches regardless of language
+        ENGLISH    = "en",   "English"
+        SWAHILI    = "sw",   "Swahili"
+        FRENCH     = "fr",   "French"
+        ARABIC     = "ar",   "Arabic"
+        SPANISH    = "es",   "Spanish"
+        PORTUGUESE = "pt",   "Portuguese"
+        GERMAN     = "de",   "German"
+        CHINESE    = "zh",   "Chinese"
+        HINDI      = "hi",   "Hindi"
+
+    language = models.CharField(
+        max_length=5,
+        choices=Language.choices,
+        default=Language.ANY,
+        blank=True,
+        help_text=(
+            "Language this rule applies to. "
+            "Leave blank to match any language."
+        ),
     )
     reply_text = models.TextField(
         help_text="The message text to send when this rule matches.",
