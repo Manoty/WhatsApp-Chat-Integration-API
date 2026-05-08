@@ -863,4 +863,210 @@ class APIKey(TimeStampedModel):
             return http_method in ("GET", "POST", "PUT", "PATCH", "DELETE")
         if self.scope == self.Scope.ADMIN:
             return True
-        return False              
+        return False      
+    
+    
+# ─── Labels ───────────────────────────────────────────────────────────────────
+
+class Label(TimeStampedModel):
+    """
+    A coloured tag scoped to a BusinessAccount.
+    Multiple labels can be applied to one conversation.
+
+    Example labels: urgent, billing, vip, follow-up, bug, feedback
+    """
+
+    # Predefined colour palette — matches common UI design systems
+    COLOUR_CHOICES = [
+        ("red",    "Red"),
+        ("orange", "Orange"),
+        ("yellow", "Yellow"),
+        ("green",  "Green"),
+        ("blue",   "Blue"),
+        ("purple", "Purple"),
+        ("pink",   "Pink"),
+        ("grey",   "Grey"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(
+        BusinessAccount,
+        on_delete=models.CASCADE,
+        related_name="labels",
+    )
+    name = models.CharField(
+        max_length=50,
+        help_text="Label name e.g. 'urgent', 'billing', 'vip'",
+    )
+    colour = models.CharField(
+        max_length=10,
+        choices=COLOUR_CHOICES,
+        default="blue",
+    )
+    description = models.CharField(max_length=255, blank=True, default="")
+    is_active   = models.BooleanField(default=True)
+
+    class Meta:
+        db_table      = "labels"
+        unique_together = ("business", "name")
+        ordering      = ["name"]
+
+    def __str__(self):
+        return f"[{self.colour}] {self.name} @ {self.business.name}"
+
+
+class ConversationLabel(TimeStampedModel):
+    """
+    Many-to-many join between Conversation and Label.
+    Tracks who applied the label and when.
+    """
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="conversation_labels",
+    )
+    label = models.ForeignKey(
+        Label,
+        on_delete=models.CASCADE,
+        related_name="conversation_labels",
+    )
+    applied_by   = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Agent name or API key prefix that applied this label",
+    )
+
+    class Meta:
+        db_table        = "conversation_labels"
+        unique_together = ("conversation", "label")
+        ordering        = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.label.name} → Conv {self.conversation_id}"
+
+
+# ─── Agents ───────────────────────────────────────────────────────────────────
+
+class Agent(TimeStampedModel):
+    """
+    A human support agent who can be assigned conversations.
+
+    Scoped to one BusinessAccount.
+    max_conversations = capacity limit for auto-assignment.
+    last_assigned_at  = used for round-robin ordering.
+    """
+
+    class Status(models.TextChoices):
+        ONLINE  = "online",  "Online"    # available for assignment
+        AWAY    = "away",    "Away"      # temporarily unavailable
+        OFFLINE = "offline", "Offline"  # not available
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(
+        BusinessAccount,
+        on_delete=models.CASCADE,
+        related_name="agents",
+    )
+    name         = models.CharField(max_length=255)
+    email        = models.EmailField()
+    status       = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ONLINE,
+    )
+    max_conversations = models.PositiveIntegerField(
+        default=10,
+        help_text="Maximum open conversations this agent can handle at once",
+    )
+    last_assigned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Used for round-robin ordering — least recently assigned goes first",
+    )
+    # Total lifetime assignment stats
+    total_assigned  = models.PositiveIntegerField(default=0, editable=False)
+    total_resolved  = models.PositiveIntegerField(default=0, editable=False)
+
+    class Meta:
+        db_table        = "agents"
+        unique_together = ("business", "email")
+        ordering        = ["name"]
+
+    def __str__(self):
+        return f"{self.name} <{self.email}> [{self.status}] @ {self.business.name}"
+
+    @property
+    def active_conversation_count(self) -> int:
+        """Current number of open conversations assigned to this agent."""
+        return Conversation.objects.filter(
+            business=self.business,
+            assigned_to=self.email,
+            status=Conversation.Status.OPEN,
+        ).count()
+
+    @property
+    def is_available(self) -> bool:
+        """True if online and under capacity."""
+        if self.status != self.Status.ONLINE:
+            return False
+        return self.active_conversation_count < self.max_conversations
+
+    def increment_assigned(self):
+        Agent.objects.filter(id=self.id).update(
+            total_assigned=models.F("total_assigned") + 1,
+            last_assigned_at=timezone.now(),
+        )
+
+    def increment_resolved(self):
+        Agent.objects.filter(id=self.id).update(
+            total_resolved=models.F("total_resolved") + 1,
+        )
+
+
+class AssignmentLog(TimeStampedModel):
+    """
+    Immutable audit trail of every assignment event.
+    One record per assignment — manual and auto-assigned.
+    """
+
+    class AssignmentType(models.TextChoices):
+        AUTO   = "auto",   "Auto (Round-Robin)"
+        MANUAL = "manual", "Manual"
+
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="assignment_logs",
+    )
+    agent        = models.ForeignKey(
+        Agent,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="assignment_logs",
+    )
+    assigned_by  = models.CharField(
+        max_length=255,
+        blank=True,
+        default="system",
+        help_text="Who triggered this assignment (agent email or 'system')",
+    )
+    assignment_type = models.CharField(
+        max_length=10,
+        choices=AssignmentType.choices,
+        default=AssignmentType.AUTO,
+    )
+    unassigned_at    = models.DateTimeField(null=True, blank=True)
+    unassignment_reason = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        db_table = "assignment_logs"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.assignment_type} | {self.agent} → "
+            f"Conv {self.conversation_id} @ {self.created_at:%Y-%m-%d %H:%M}"
+        )            
