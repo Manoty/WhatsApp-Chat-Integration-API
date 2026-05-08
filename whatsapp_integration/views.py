@@ -37,6 +37,10 @@ from .services.message_service import MessageService, MessageSendError
 from .security import verify_webhook_signature
 from .throttles import WebhookRateThrottle, SendMessageRateThrottle
 
+from .models import APIKey
+from .serializers import APIKeySerializer, CreateAPIKeySerializer
+from .services.api_key_service import APIKeyService
+
 logger = logging.getLogger(__name__)
 
 
@@ -1306,3 +1310,255 @@ def _event_description(event_type: str) -> str:
         "conversation.closed": "Fired when a conversation is closed",
         "contact.created":     "Fired when a new contact is auto-created",
     }.get(event_type, "")    
+    
+    
+# ─── API Key Management ───────────────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def api_key_list(request):
+    """
+    List all API keys or create a new one.
+
+    GET  /api/keys/
+    POST /api/keys/
+    {
+        "business_id": "<uuid>",
+        "name": "Production App",
+        "scope": "write",
+        "expiry_at": "2027-01-01T00:00:00Z",
+        "allowed_ips": []
+    }
+
+    ⚠️  The raw key is returned ONCE on creation.
+        Store it securely — it cannot be retrieved again.
+    """
+    if request.method == "GET":
+        qs = APIKey.objects.select_related("business").all()
+
+        business_id = request.GET.get("business_id")
+        if business_id:
+            qs = qs.filter(business__id=business_id)
+
+        status_filter = request.GET.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        scope_filter = request.GET.get("scope")
+        if scope_filter:
+            qs = qs.filter(scope=scope_filter)
+
+        return Response(APIKeySerializer(qs, many=True).data)
+
+    # POST — create new key
+    serializer = CreateAPIKeySerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"status": "error", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    v = serializer.validated_data
+
+    try:
+        svc          = APIKeyService()
+        api_key, raw = svc.create_key(
+            business_id=str(v["business_id"]),
+            name=v["name"],
+            scope=v.get("scope", APIKey.Scope.WRITE),
+            expiry_at=v.get("expiry_at"),
+            allowed_ips=v.get("allowed_ips", []),
+        )
+
+        return Response(
+            {
+                "status":  "created",
+                "key":     raw,              # ← shown ONCE, store it now
+                "warning": "Save this key immediately. It will not be shown again.",
+                "api_key": APIKeySerializer(api_key).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    except ValueError as exc:
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def api_key_detail(request, key_id):
+    """
+    Retrieve, update, or delete a single API key.
+
+    GET    /api/keys/<id>/
+    PATCH  /api/keys/<id>/   — update name, allowed_ips, expiry_at
+    DELETE /api/keys/<id>/   — permanently delete (prefer revoke instead)
+    """
+    try:
+        api_key = APIKey.objects.select_related("business").get(id=key_id)
+    except APIKey.DoesNotExist:
+        return Response(
+            {"error": "API key not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if request.method == "GET":
+        return Response(APIKeySerializer(api_key).data)
+
+    if request.method == "DELETE":
+        name = api_key.name
+        api_key.delete()
+        logger.info("API key deleted | name=%s", name)
+        return Response({"status": "deleted", "name": name})
+
+    # PATCH — only allow updating safe fields
+    allowed = {"name", "expiry_at", "allowed_ips"}
+    updates = {k: v for k, v in request.data.items() if k in allowed}
+
+    for field, value in updates.items():
+        setattr(api_key, field, value)
+
+    api_key.save(update_fields=list(updates.keys()) + ["updated_at"])
+    return Response(APIKeySerializer(api_key).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_key_revoke(request, key_id):
+    """
+    Immediately revoke an API key.
+    The key stops working instantly — no grace period.
+
+    POST /api/keys/<id>/revoke/
+    """
+    try:
+        svc     = APIKeyService()
+        api_key = svc.revoke_key(key_id)
+        return Response({
+            "status":  "revoked",
+            "key_id":  str(api_key.id),
+            "name":    api_key.name,
+            "revoked_at": timezone.now().isoformat(),
+        })
+    except ValueError as exc:
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except APIKey.DoesNotExist:
+        return Response(
+            {"error": "API key not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_key_rotate(request, key_id):
+    """
+    Rotate an API key — generates a new key, revokes the old one.
+
+    POST /api/keys/<id>/rotate/
+
+    ⚠️  The new raw key is returned ONCE.
+        The old key stops working immediately.
+        Update your application before rotating.
+    """
+    try:
+        svc         = APIKeyService()
+        new_key, raw = svc.rotate_key(key_id)
+        return Response(
+            {
+                "status":  "rotated",
+                "key":     raw,
+                "warning": "Old key is now revoked. Save this new key immediately.",
+                "api_key": APIKeySerializer(new_key).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+    except ValueError as exc:
+        return Response(
+            {"status": "error", "message": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except APIKey.DoesNotExist:
+        return Response(
+            {"error": "API key not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_key_stats(request, key_id):
+    """
+    Get usage statistics for an API key.
+
+    GET /api/keys/<id>/stats/
+    """
+    try:
+        api_key = APIKey.objects.select_related("business").get(id=key_id)
+    except APIKey.DoesNotExist:
+        return Response(
+            {"error": "API key not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    from django.utils import timezone as tz
+
+    now = tz.now()
+    return Response({
+        "key_id":          str(api_key.id),
+        "name":            api_key.name,
+        "prefix":          api_key.prefix,
+        "scope":           api_key.scope,
+        "status":          api_key.status,
+        "request_count":   api_key.request_count,
+        "last_used_at":    api_key.last_used_at,
+        "created_at":      api_key.created_at,
+        "expiry_at":       api_key.expiry_at,
+        "days_until_expiry": (
+            max(0, (api_key.expiry_at - now).days)
+            if api_key.expiry_at else None
+        ),
+        "allowed_ips":     api_key.allowed_ips,
+        "rotated_from":    str(api_key.rotated_from_id)
+                           if api_key.rotated_from_id else None,
+        "business":        api_key.business.name,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_key_verify(request):
+    """
+    Verify the current request's API key and return its metadata.
+    Useful for client apps to confirm which key they are using.
+
+    GET /api/keys/verify/
+    """
+    user = request.user
+    if not hasattr(user, "api_key"):
+        return Response({
+            "valid":  True,
+            "type":   "legacy",
+            "scope":  "admin",
+            "note":   "Legacy env-var key — migrate to DB keys",
+        })
+
+    api_key = user.api_key
+    return Response({
+        "valid":          True,
+        "key_id":         str(api_key.id),
+        "name":           api_key.name,
+        "prefix":         api_key.prefix,
+        "scope":          api_key.scope,
+        "status":         api_key.status,
+        "business":       api_key.business.name,
+        "request_count":  api_key.request_count,
+        "last_used_at":   api_key.last_used_at,
+        "expiry_at":      api_key.expiry_at,
+    })    
