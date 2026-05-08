@@ -10,13 +10,9 @@ logger = logging.getLogger(__name__)
 def on_message_saved(sender, instance: Message, created: bool, **kwargs):
     """
     Push WebSocket event when a message is created or its status changes.
-    Fires for both inbound and outbound messages.
     """
     try:
-        from .ws.channel_utils import (
-            push_to_business,
-            push_to_conversation,
-        )
+        from .ws.channel_utils import push_to_business, push_to_conversation
 
         conv        = instance.conversation
         business_id = str(conv.business_id)
@@ -49,7 +45,6 @@ def on_message_saved(sender, instance: Message, created: bool, **kwargs):
             "created_at":      instance.created_at.isoformat(),
         }
 
-        # Push to both the business feed and conversation feed
         push_to_business(business_id, event_type, payload)
         push_to_conversation(conv_id, event_type, payload)
 
@@ -58,10 +53,10 @@ def on_message_saved(sender, instance: Message, created: bool, **kwargs):
 
 
 @receiver(post_save, sender=Conversation)
-def on_conversation_saved(sender, instance: Conversation, created: bool, **kwargs):
-    """
-    Push WebSocket event when a conversation is created or updated.
-    """
+def on_conversation_saved(
+    sender, instance: Conversation, created: bool, **kwargs
+):
+    """Push WebSocket event when a conversation is created or updated."""
     try:
         from .ws.channel_utils import push_to_business
 
@@ -87,14 +82,14 @@ def on_conversation_saved(sender, instance: Conversation, created: bool, **kwarg
         push_to_business(business_id, event_type, payload)
 
     except Exception as exc:
-        logger.warning("Conversation signal WS push failed (non-fatal): %s", exc)
+        logger.warning(
+            "Conversation signal WS push failed (non-fatal): %s", exc
+        )
 
 
 @receiver(post_save, sender=Agent)
 def on_agent_saved(sender, instance: Agent, created: bool, **kwargs):
-    """
-    Push WebSocket event when an agent's status changes.
-    """
+    """Push WebSocket event when an agent status changes."""
     try:
         from .ws.channel_utils import push_to_business, push_to_agent
 
@@ -103,10 +98,10 @@ def on_agent_saved(sender, instance: Agent, created: bool, **kwargs):
 
         event_type = "agent.created" if created else "agent.status_changed"
         payload = {
-            "agent_id":    agent_id,
-            "name":        instance.name,
-            "email":       instance.email,
-            "status":      instance.status,
+            "agent_id":             agent_id,
+            "name":                 instance.name,
+            "email":                instance.email,
+            "status":               instance.status,
             "active_conversations": instance.active_conversation_count,
         }
 
@@ -114,11 +109,15 @@ def on_agent_saved(sender, instance: Agent, created: bool, **kwargs):
         push_to_agent(agent_id, event_type, payload)
 
     except Exception as exc:
-        logger.warning("Agent signal WS push failed (non-fatal): %s", exc)
+        logger.warning(
+            "Agent signal WS push failed (non-fatal): %s", exc
+        )
 
 
 @receiver(post_save, sender=WhatsAppContact)
-def on_contact_saved(sender, instance: WhatsAppContact, created: bool, **kwargs):
+def on_contact_saved(
+    sender, instance: WhatsAppContact, created: bool, **kwargs
+):
     """Push WebSocket event when a new contact is created."""
     if not created:
         return
@@ -136,4 +135,6 @@ def on_contact_saved(sender, instance: WhatsAppContact, created: bool, **kwargs)
             },
         )
     except Exception as exc:
-        logger.warning("Contact signal WS push failed (non-fatal): %s", exc)
+        logger.warning(
+            "Contact signal WS push failed (non-fatal): %s", exc
+        )
